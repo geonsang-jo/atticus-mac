@@ -57,7 +57,9 @@ _PLAYER_ACTIONS = {
     Action.PAUSE, Action.PLAY, Action.MUTE, Action.UNMUTE, Action.VOLUME, Action.SEEK, Action.STATUS,
 }
 
-_YOUTUBE = r"(?:유튜브|youtube)"
+_YOUTUBE = r"(?:유튜브|(?<![A-Za-z0-9_])you ?tube(?![A-Za-z0-9_]))"
+_YOUTUBE_MENTION = re.compile(_YOUTUBE, re.IGNORECASE)
+_UNSUPPORTED_YOUTUBE = Command(Action.INVALID, _CAPABILITIES)
 _PREFIX = rf"(?:{_YOUTUBE}(?:에서|의)?\s*)?"
 _PLEASE = r"(?:\s*(?:줘|주세요|주십시오))?"
 _DO = rf"(?:\s*(?:해|하세요|해요){_PLEASE})?"
@@ -96,17 +98,6 @@ _VOLUME = re.compile(
 _SEEK = re.compile(
     rf"{_PREFIX}(?:영상(?:을)?\s*)?([+\-−]?[\d가-힣.]+)\s*초\s*(앞으로|뒤로)"
     rf"(?:\s*(?:가|이동{_DO}|돌려){_PLEASE})?", re.IGNORECASE,
-)
-_UNSUPPORTED = re.compile(
-    rf"{_YOUTUBE}(?:에서|에|의|를)?\s+.+?\s*(?:재생{_DO}|틀어{_PLEASE})"
-    rf"|{_PREFIX}검색\s*결과.+?선택{_DO}"
-    rf"|{_PREFIX}(?:다음|이전)\s*(?:추천\s*)?영상(?:을|으로)?\s*"
-    rf"(?:재생{_DO}|선택{_DO}|틀어{_PLEASE}|넘겨{_PLEASE}|가{_PLEASE})?"
-    rf"|(?:{_YOUTUBE}(?:를|에서)?\s*|영상(?:을)?\s*)전체\s*화면(?:으로)?\s*"
-    rf"(?:해{_PLEASE}|켜{_PLEASE}|(?:전환|해제){_DO})?"
-    rf"|{_PREFIX}광고(?:를)?\s*건너\s*뛰어{_PLEASE}"
-    r"|play .+ on (?:youtube|you tube)|(?:next|previous) youtube video|fullscreen youtube",
-    re.IGNORECASE,
 )
 _NUMERALS = {
     "영": 0, "공": 0, "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5, "육": 6,
@@ -183,8 +174,8 @@ def parse_command(text: str) -> Command | None:
         if value is not None and 1 <= value <= _MAX_SEEK:
             return Command(Action.SEEK, value if seek[2] == "앞으로" else -value)
         return Command(Action.INVALID, f"이동할 시간을 1초에서 {_MAX_SEEK}초 사이로 말해 주세요.")
-    if _UNSUPPORTED.fullmatch(text):
-        return Command(Action.INVALID, _CAPABILITIES)
+    if _YOUTUBE_MENTION.search(text):
+        return _UNSUPPORTED_YOUTUBE
     return None
 
 
@@ -464,8 +455,11 @@ class AsideMedia:
         return _prompt(choices)
 
     def _handle_locked(self, text, command, state):
-        if command is None:
-            return self._follow_up(text, state)
+        # A scoped tab choice also mentions YouTube, so check it before the capability reply.
+        if command is None or command is _UNSUPPORTED_YOUTUBE:
+            reply = self._follow_up(text, state)
+            if reply is not None or command is None:
+                return reply
         if "pending" in state:
             state.pop("pending")
             _write_json(self.state_path, state)

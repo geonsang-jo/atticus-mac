@@ -78,8 +78,8 @@ class MediaParserTests(unittest.TestCase):
     def test_unrelated_and_underspecified_requests(self):
         parse = media_module(self).parse_command
         for text in ("테스트 실행해", "반드시 영상 멈춰야 하는 정책", "개발 세션들 지금 뭐 해?",
-                     "play some jazz", "2번", "유튜브 정책 알려줘",
-                     "유튜브에서 다음 영상 재생하는 법 알려줘", "전체 화면으로 해 줘"):
+                     "play some jazz", "2번", "전체 화면으로 해 줘",
+                     "search about NotYouTube", "다음 영상 재생하는 법 알려줘"):
             with self.subTest(text=text):
                 self.assertIsNone(parse(text))
 
@@ -146,12 +146,15 @@ class MediaAdapterTests(unittest.TestCase):
         transport = AsideTransport(*receipts)
         return self.media.AsideMedia(transport=transport, state_path=self.state), transport
 
-    def test_unsupported_youtube_operations_reply_without_browser_actions(self):
+    def test_explicit_youtube_domain_replies_locally_without_browser_actions(self):
         adapter, transport = self.adapter()
         for text in (
             "유튜브에서 재즈 재생해", "유튜브 검색 결과 첫 번째 틀어 줘",
-            "유튜브에서 전체 화면으로 전환해 줘", "영상 전체 화면으로 해 줘",
-            "다음 추천 영상 선택해", "유튜브 광고 건너뛰어", "Play jazz on YouTube",
+            "유튜브에서 전체 화면으로 전환해 줘", "유튜브 다음 추천 영상 선택해",
+            "유튜브에서 다음 영상으로 넘어가 줘", "유튜브에 댓글 달아줘",
+            "유튜브 정책 알려줘", "유튜브에서 다음 영상 재생하는 법 알려줘",
+            "Play jazz on YouTube", "skip the ad on YouTube",
+            "How can I upload a video to You Tube?",
         ):
             with self.subTest(text=text):
                 self.assertTrue(adapter.recognizes(text))
