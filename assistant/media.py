@@ -33,7 +33,9 @@ _PLAYER_UNAVAILABLE = "유튜브 플레이어 상태를 확인할 수 없어요.
 _CLEANUP_FAILED = "Aside 탭 연결을 해제하지 못했어요."
 _LIST_STOPPED = "Aside 탭 연결을 해제하지 못해 유튜브 요청을 중단했어요."
 _REJECTED = "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
-_CAPABILITIES = "유튜브 열기와 검색, 열린 영상의 재생·정지, 소리와 시간 조절, 제목 확인을 지원해요."
+_UNRECOGNIZED = "요청을 이해하지 못해 유튜브 동작을 실행하지 않았어요. “유튜브 재생해 줘”처럼 말해 주세요."
+_TAB_NOT_CONFIRMED = "탭 번호를 확인할 수 없어요. 유튜브 요청을 다시 말해 주세요."
+_NO_VIDEOS = "Aside에 열린 유튜브 영상 탭이 없어요."
 
 
 class Action(str, Enum):
@@ -56,13 +58,22 @@ class Command:
     value: str | int | None = None
 
 
+@dataclass(frozen=True)
+class _TabReference:
+    number: int
+    explicit_tab: bool
+    locative: bool
+    operation: str | None
+    conflicting_numbers: bool
+
+
 _PLAYER_ACTIONS = {
     Action.PAUSE, Action.PLAY, Action.MUTE, Action.UNMUTE, Action.VOLUME, Action.SEEK, Action.STATUS,
 }
 
 _YOUTUBE = r"(?:유튜브|(?<![A-Za-z0-9_])you ?tube(?![A-Za-z0-9_]))"
 _YOUTUBE_MENTION = re.compile(_YOUTUBE, re.IGNORECASE)
-_UNSUPPORTED_YOUTUBE = Command(Action.INVALID, _CAPABILITIES)
+_UNSUPPORTED_YOUTUBE = Command(Action.INVALID, _UNRECOGNIZED)
 _TAB_CHOICE_NEEDED = Command(
     Action.INVALID, "선택할 유튜브 탭 목록이 없어요. 유튜브 요청을 먼저 말해 주세요.",
 )
@@ -123,10 +134,11 @@ _NUMERALS = {
 }
 _SINO_DIGITS = "일이삼사오육칠팔구"
 _ORDINAL = r"([0-9]{1,4}|[가-힣]{1,4})\s*번(?:째)?"
+_PURE_ORDINAL_CHOICE = re.compile(rf"{_ORDINAL}(?:\s*탭(?:을)?)?(?:\s*(?:선택|으로|로|영상))?{_DO}")
 _SELECTION_SCOPE = re.compile(rf"^{_YOUTUBE}(?:에서|의)?(?:\s+|(?=[0-9]))", re.IGNORECASE)
 _TAB_FOLLOW_UP = re.compile(
     rf"{_ORDINAL}(?:\s+{_ORDINAL}(?=\s*탭))?"
-    r"(?:\s*(탭)(?:을|에서|의|으로|로)?)?(?:\s+(.+))?",
+    r"(?:\s*(탭)(?:(\s*에\s*있는)|을|에서|의|으로|로)?)?(?:\s+(.+))?",
 )
 
 
@@ -151,6 +163,27 @@ def _spoken_number(text: str) -> int | None:
     return result
 
 
+def _tab_reference(text):
+    match = _TAB_FOLLOW_UP.fullmatch(text)
+    if match is None:
+        return None
+    original, repeated, tab, locative, operation = match.groups()
+    number = _spoken_number(original)
+    if number is None:
+        return None
+    return _TabReference(number, bool(tab), bool(locative), operation,
+                         bool(repeated) and number != _spoken_number(repeated))
+
+
+def _tab_command(reference):
+    if reference.conflicting_numbers or (reference.locative and not reference.operation):
+        return Command(Action.REJECT)
+    if reference.operation is None:
+        return None
+    command = parse_command(reference.operation)
+    return command if command and command.action in _PLAYER_ACTIONS else Command(Action.REJECT)
+
+
 def _search_term(text):
     text = text.strip()
     if len(text) > 1 and text[-1] in "을를":
@@ -169,8 +202,8 @@ def parse_command(text: str) -> Command | None:
     text = _clean(text)
     if _MEDIA_CONTEXT.search(text) and _NEGATIVE.search(text):
         return Command(Action.REJECT)
-    tab_request = _TAB_FOLLOW_UP.fullmatch(_SELECTION_SCOPE.sub("", text, count=1))
-    if tab_request and tab_request[3] and _spoken_number(tab_request[1]) is not None:
+    reference = _tab_reference(_SELECTION_SCOPE.sub("", text, count=1))
+    if reference and reference.explicit_tab:
         return _TAB_CHOICE_NEEDED
 
     korean_search = _SEARCH_QUERY.fullmatch(text)
@@ -273,7 +306,7 @@ def _selection_request(text, choices):
             return [], _AMBIGUOUS_TAB_CHOICE
         return selected, None
 
-    pure = re.fullmatch(rf"{_ORDINAL}(?:\s*탭(?:을)?)?(?:\s*(?:선택|으로|로|영상))?{_DO}", text)
+    pure = _PURE_ORDINAL_CHOICE.fullmatch(text)
     if pure:
         number = _spoken_number(pure[1])
         if number is not None:
@@ -286,20 +319,15 @@ def _selection_request(text, choices):
         if named:
             return named, None
 
-    tab_request = _TAB_FOLLOW_UP.fullmatch(text)
-    if tab_request:
-        original, repeated, tab, operation = tab_request.groups()
-        number = _spoken_number(original)
-        if number is not None:
-            if repeated and number != _spoken_number(repeated):
-                return [], Command(Action.REJECT)
-            if operation is None:
-                return numbered_selection(number)
-            command = parse_command(operation)
-            if command and command.action in _PLAYER_ACTIONS:
-                return ([], _AMBIGUOUS_TAB_CHOICE) if exact else (indices(number), command)
-            if tab or (not exact and _MEDIA_CONTEXT.search(operation)):
-                return [], Command(Action.REJECT)
+    reference = _tab_reference(text)
+    if reference:
+        command = _tab_command(reference)
+        if command is None:
+            return numbered_selection(reference.number)
+        if command.action in _PLAYER_ACTIONS:
+            return ([], _AMBIGUOUS_TAB_CHOICE) if exact else (indices(reference.number), command)
+        if reference.explicit_tab or (not exact and _MEDIA_CONTEXT.search(reference.operation or "")):
+            return [], command
 
     return (exact, None) if exact else None
 
@@ -476,7 +504,7 @@ class AsideMedia:
             if override.action == Action.INVALID:
                 return str(override.value)
             if len(indices) != 1:
-                return "탭 번호를 확인할 수 없어요. 유튜브 요청을 다시 말해 주세요."
+                return _TAB_NOT_CONFIRMED
             command = override
         if len(indices) != 1:
             return _prompt(choices, page)
@@ -494,12 +522,37 @@ class AsideMedia:
         _write_json(self.state_path, state)
         return self._apply(command, video)
 
+    def _handle_unprompted_tab(self, text, state):
+        scoped = _SELECTION_SCOPE.sub("", _clean(text), count=1)
+        if _PURE_ORDINAL_CHOICE.fullmatch(scoped):
+            return str(_TAB_CHOICE_NEEDED.value)
+        reference = _tab_reference(scoped)
+        command = _tab_command(reference)
+        if command is None:
+            return str(_TAB_CHOICE_NEEDED.value)
+        if command.action == Action.REJECT:
+            return _REJECTED
+        if not 1 <= reference.number <= _MAX_OPTIONS:
+            return _TAB_NOT_CONFIRMED
+        videos, failure = self._videos()
+        if failure:
+            return failure
+        if not videos:
+            return _NO_VIDEOS
+        if reference.number > len(videos):
+            return _TAB_NOT_CONFIRMED
+        if len(videos) > 1:
+            return self._offer_videos(command, videos, state)
+        if not _player_state(videos[0]):
+            return _PLAYER_UNAVAILABLE
+        return self._apply(command, videos[0])
+
     def _handle_player(self, command, state):
         videos, failure = self._videos()
         if failure:
             return failure
         if not videos:
-            return "Aside에 열린 유튜브 영상 탭이 없어요."
+            return _NO_VIDEOS
         selected = _identity(state.get("selected"))
         video = next((video for video in videos if selected and _identity(video) == selected), None)
         if video or len(videos) == 1:
@@ -507,6 +560,9 @@ class AsideMedia:
         playing = [video for video in videos if video.get("paused") is False and _player_state(video)]
         if len(playing) == 1 and all(_player_state(video) for video in videos):
             return self._apply(command, playing[0])
+        return self._offer_videos(command, videos, state)
+
+    def _offer_videos(self, command, videos, state):
         choices = [{**_identity(video), "title": _title(video)} for video in videos]
         state["pending"] = {
             "expires": time.time() + _SELECTION_TTL,
@@ -525,6 +581,8 @@ class AsideMedia:
         if "pending" in state:
             state.pop("pending")
             _write_json(self.state_path, state)
+        if command == _TAB_CHOICE_NEEDED:
+            return self._handle_unprompted_tab(text, state)
         if command.action == Action.REJECT:
             return _REJECTED
         if command.action == Action.INVALID:

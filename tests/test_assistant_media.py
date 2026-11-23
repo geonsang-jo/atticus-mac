@@ -182,13 +182,15 @@ class MediaAdapterTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertTrue(adapter.recognizes(text))
-                self.assertIn("검색", adapter.handle(text))
+                reply = adapter.handle(text)
+                self.assertIn("동작을 실행하지 않았어요", reply)
+                self.assertIn("유튜브 재생해 줘", reply)
         self.assertEqual(transport.requests, [])
 
     def test_conversational_context_never_acts_on_rejects_or_unsupported_requests(self):
         adapter, transport = self.adapter()
         self.assertIn("실행하지", adapter.handle("지금 듣고 있는 YouTube 다시 틀지 마."))
-        self.assertIn("검색", adapter.handle("지금 듣고 있는 YouTube 다음 영상으로 넘어가 줘."))
+        self.assertIn("실행하지", adapter.handle("지금 듣고 있는 YouTube 다음 영상으로 넘어가 줘."))
         self.assertEqual(transport.requests, [])
 
     def test_playback_state_transition_resumes_a_verified_target(self):
@@ -208,7 +210,7 @@ class MediaAdapterTests(unittest.TestCase):
                 reply = adapter.handle(text)
                 self.assertIsNotNone(reply, text)
                 self.assertIn("실행하지", reply)
-        self.assertIn("검색", adapter.handle("유튜브를 전체 화면 모드로 전환해 줘"))
+        self.assertIn("실행하지", adapter.handle("유튜브를 전체 화면 모드로 전환해 줘"))
         self.assertEqual(transport.requests, [])
 
     def test_negative_command_never_calls_aside(self):
@@ -286,6 +288,93 @@ class MediaAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.handle(text), "영상을 재생했어요.")
         self.assertEqual([request["op"] for request in transport.requests], ["list", "play"])
         self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_locative_tab_action_uses_the_offered_number_and_new_action(self):
+        for text, action in (
+            ("첫번째탭에 있는 유튜브 재생해줘", "play"),
+            ("첫 번째 탭에 있는 YouTube 재생해 줘.", "play"),
+            ("첫 번 첫 번째 탭에 있는 유튜브를 멈춰 줘.", "pause"),
+        ):
+            with self.subTest(text=text):
+                self.state.unlink(missing_ok=True)
+                adapter, _ = self.adapter(listed(FIRST, SECOND))
+                self.assertIn("1번", adapter.handle("계속 재생해"))
+                expected = "영상을 재생했어요." if action == "play" else "영상을 일시 정지했어요."
+                target = {**FIRST, "paused": action == "play"}
+                adapter, transport = self.adapter(
+                    listed(SECOND, target), changed(action, target, paused=action == "pause")
+                )
+                self.assertEqual(adapter.handle(text), expected)
+                self.assertEqual([request["op"] for request in transport.requests], ["list", action])
+                self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_locative_tab_keeps_the_offered_video_identity(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        adapter.handle("계속 재생해")
+        replacement = {**FIRST, "videoId": "AAAAAAAAAAA",
+                       "url": "https://www.youtube.com/watch?v=AAAAAAAAAAA"}
+        adapter, transport = self.adapter(listed(replacement, SECOND))
+        self.assertIn("영상이 바뀌었어요", adapter.handle("첫번째탭에 있는 유튜브 재생해줘"))
+        self.assertEqual([request["op"] for request in transport.requests], ["list"])
+
+    def test_locative_first_tab_with_no_or_expired_prompt_uses_verified_unique_video(self):
+        text = "첫번째탭에 있는 유튜브 재생해줘"
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                self.state.unlink(missing_ok=True)
+                if expired:
+                    adapter, _ = self.adapter(listed(FIRST, SECOND))
+                    adapter.handle("영상 멈춰")
+                    state = json.loads(self.state.read_text())
+                    state["pending"]["expires"] = 0
+                    self.state.write_text(json.dumps(state))
+                adapter, transport = self.adapter(listed(SECOND), changed("play", SECOND, paused=False))
+                self.assertTrue(adapter.recognizes(text))
+                self.assertEqual(adapter.handle(text), "영상을 재생했어요.")
+                self.assertEqual([request["op"] for request in transport.requests], ["list", "play"])
+                self.assertEqual(transport.requests[-1]["target"]["targetId"], SECOND["targetId"])
+
+    def test_unprompted_locative_tab_offers_multiple_videos_before_mutating(self):
+        playing = {**FIRST, "paused": False}
+        adapter, transport = self.adapter(listed(playing, SECOND))
+        reply = adapter.handle("첫 번째 탭에 있는 유튜브 재생해줘")
+        self.assertIn("1번, 피아노 연주", reply)
+        self.assertIn("2번, 오케스트라 합주", reply)
+        self.assertEqual(transport.requests, [{"op": "list"}])
+
+        adapter, transport = self.adapter(listed(SECOND, playing), changed("play", SECOND, paused=False))
+        self.assertEqual(adapter.handle("유튜브2번"), "영상을 재생했어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], SECOND["targetId"])
+
+    def test_unprompted_locative_tab_needs_matching_ordinal_and_observed_player(self):
+        for text, videos in (
+            ("2번 탭에 있는 유튜브 재생해줘", (FIRST,)),
+            ("3번 탭에 있는 유튜브 재생해줘", (FIRST, SECOND)),
+            ("1번 탭에 있는 유튜브 재생해줘", ({**FIRST, "paused": None},)),
+        ):
+            with self.subTest(text=text):
+                adapter, transport = self.adapter(listed(*videos))
+                reply = adapter.handle(text)
+                self.assertIn("확인할 수 없어요", reply)
+                self.assertEqual(transport.requests, [{"op": "list"}])
+                self.assertFalse(adapter.recognizes("1번"))
+
+    def test_locative_tab_with_missing_or_conflicting_action_never_replays_pending(self):
+        for text in (
+            "첫번째탭에 있는",
+            "첫번째탭에 있는 유튜브 재생해저ㅜ",
+            "첫 번째 탭에 있는 유튜브 재생하지 마",
+            "첫 번 두 번째 탭에 있는 유튜브 재생해줘",
+            "첫 번째 탭에 있는 유튜브 재생해줘 그리고 멈춰",
+            "99번 탭에 있는 유튜브 재생해줘",
+        ):
+            with self.subTest(text=text):
+                adapter, _ = self.adapter(listed(FIRST, SECOND))
+                self.assertIn("1번", adapter.handle("계속 재생해"))
+                adapter, transport = self.adapter()
+                self.assertIsNotNone(adapter.handle(text))
+                self.assertFalse(adapter.recognizes("1번"))
+                self.assertEqual(transport.requests, [])
 
     def test_follow_up_tab_command_uses_its_explicit_operation(self):
         for text in ("유튜브 첫 번째 탭 멈춰 줘", "첫 번째 탭 일시 정지해줘", "유튜브1번 탭 멈춰"):
