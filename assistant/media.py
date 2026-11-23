@@ -22,7 +22,10 @@ _TARGET_FIELDS = ("targetId", "url", "videoId")
 _MAX_SEEK = 300
 _MAX_QUERY = 240
 _SELECTION_TTL = 120
-_MAX_OPTIONS = 8
+_PAGE_SIZE = 8
+_MAX_OPTIONS = 40
+_MAX_STATE_SIZE = 262_144
+_PAGE_MOVES = {"다음 목록": 1, "이전 목록": -1}
 _UNVERIFIED = "Aside에서 유튜브 동작을 확인할 수 없어요."
 _PLAYER_UNAVAILABLE = "유튜브 플레이어 상태를 확인할 수 없어요."
 
@@ -220,8 +223,10 @@ def _title(video):
 
 
 def _selection_request(text, choices):
-    """Return matching ordinal(s) only within the current spoken prompt."""
+    """Resolve pagination or a selection within the current prompt."""
     text = re.sub(rf"^{_YOUTUBE}(?:에서|의)?\s+", "", _clean(text), flags=re.IGNORECASE)
+    if text in _PAGE_MOVES:
+        return text
     choice = re.fullmatch(
         r"([0-9]{1,4}|[가-힣]{1,4})\s*(?:번(?:째)?|번째)(?:\s*(?:선택|으로|영상))?"
         rf"{_DO}", text,
@@ -272,10 +277,12 @@ def _pending(state):
         return None
     command = _saved_command(entry.get("command"))
     choices = entry.get("choices")
-    if command and isinstance(choices, list) and 1 < len(choices) <= _MAX_OPTIONS:
-        if all(_identity(video) for video in choices):
-            return command, choices
-    return None
+    page = entry.get("page", 0)
+    if not command or not isinstance(choices, list) or not 1 < len(choices) <= _MAX_OPTIONS:
+        return None
+    if type(page) is not int or not 0 <= page <= (len(choices) - 1) // _PAGE_SIZE:
+        return None
+    return (command, choices, page) if all(_identity(video) for video in choices) else None
 
 
 def _read_json(path):
@@ -285,8 +292,8 @@ def _read_json(path):
             info = os.fstat(source.fileno())
             if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
                 return {}
-            raw = source.read(32_769)
-        data = json.loads(raw) if len(raw) <= 32_768 else None
+            raw = source.read(_MAX_STATE_SIZE + 1)
+        data = json.loads(raw) if len(raw) <= _MAX_STATE_SIZE else None
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, RecursionError):
         return {}
@@ -368,7 +375,7 @@ class AsideMedia:
         if not receipt or receipt.get("ok") is not True or not isinstance(receipt.get("videos"), list):
             return None
         videos = [video for video in receipt["videos"] if _identity(video)]
-        if len({video["targetId"] for video in videos}) != len(videos):
+        if len(videos) > _MAX_OPTIONS or len({video["targetId"] for video in videos}) != len(videos):
             return None
         return videos
 
@@ -388,13 +395,28 @@ class AsideMedia:
             return _PLAYER_UNAVAILABLE
         return _describe(command, before, after)
 
-    def _select(self, state, pending, indices, videos):
-        command, choices = pending
-        if len(indices) != 1:
-            return _prompt(choices)
-        selected = choices[indices[0]]
-        target = _identity(selected)
-        state.pop("pending", None)
+    def _follow_up(self, text, state):
+        pending = _pending(state)
+        if pending is None:
+            return None
+        command, choices, page = pending
+        selection = _selection_request(text, choices)
+        if selection is None:
+            return None
+        if isinstance(selection, str):
+            last_page = (len(choices) - 1) // _PAGE_SIZE
+            page = max(0, min(last_page, page + _PAGE_MOVES[selection]))
+            state["pending"]["page"] = page
+            _write_json(self.state_path, state)
+            return _prompt(choices, page)
+        if len(selection) != 1:
+            return _prompt(choices, page)
+
+        videos = self._videos()
+        if videos is None:
+            return _UNVERIFIED
+        target = _identity(choices[selection[0]])
+        state.pop("pending")
         video = next((video for video in videos if _identity(video) == target), None)
         if video is None:
             _write_json(self.state_path, state)
@@ -403,19 +425,10 @@ class AsideMedia:
         _write_json(self.state_path, state)
         return self._apply(command, video)
 
-    def _handle_player(self, text, command, state):
-        pending = _pending(state)
-        indices = _selection_request(text, pending[1]) if pending and command is None else None
-        if command is None and indices is None:
-            return None
+    def _handle_player(self, command, state):
         videos = self._videos()
         if videos is None:
             return _UNVERIFIED
-        if command is None:
-            return self._select(state, pending, indices, videos)
-        if "pending" in state:
-            state.pop("pending")
-            _write_json(self.state_path, state)
         if not videos:
             return "Aside에 열린 유튜브 영상 탭이 없어요."
         selected = _identity(state.get("selected"))
@@ -425,25 +438,33 @@ class AsideMedia:
         playing = [video for video in videos if video.get("paused") is False and _player_state(video)]
         if len(playing) == 1 and all(_player_state(video) for video in videos):
             return self._apply(command, playing[0])
-        choices = [{**_identity(video), "title": _title(video)} for video in videos[:_MAX_OPTIONS]]
+        choices = [{**_identity(video), "title": _title(video)} for video in videos]
         state["pending"] = {
             "expires": time.time() + _SELECTION_TTL,
             "command": {"action": command.action.value, "value": command.value},
             "choices": choices,
         }
         _write_json(self.state_path, state)
-        return _prompt(choices, total=len(videos))
+        return _prompt(choices)
+
+    def _handle_locked(self, text, command, state):
+        if command is None:
+            return self._follow_up(text, state)
+        if "pending" in state:
+            state.pop("pending")
+            _write_json(self.state_path, state)
+        if command.action == Action.REJECT:
+            return "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
+        if command.action == Action.INVALID:
+            return str(command.value)
+        if command.action in {Action.OPEN, Action.SEARCH}:
+            return self._navigate(command)
+        return self._handle_player(command, state)
 
     def handle(self, text: str) -> str | None:
         command = parse_command(text)
         if command is None and not self.recognizes(text):
             return None
-        if command and command.action == Action.REJECT:
-            return "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
-        if command and command.action == Action.INVALID:
-            return str(command.value)
-        if command and command.action in {Action.OPEN, Action.SEARCH}:
-            return self._navigate(command)
         try:
             self.state_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             fd = os.open(
@@ -456,7 +477,7 @@ class AsideMedia:
                 if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
                     return _UNVERIFIED
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                reply = self._handle_player(text, command, _read_json(self.state_path))
+                reply = self._handle_locked(text, command, _read_json(self.state_path))
                 return reply or "유튜브 탭 선택 시간이 지났어요. 유튜브 요청을 다시 말해 주세요."
         except BlockingIOError:
             return "앞선 유튜브 요청을 처리 중이에요."
@@ -464,12 +485,21 @@ class AsideMedia:
             return _UNVERIFIED
 
 
-def _prompt(choices, total=None):
-    listings = ". ".join(f"{index}번, {_title(video)[:55]}" for index, video in enumerate(choices, 1))
-    lead = f"유튜브 영상 탭이 {total or len(choices)}개 있어요."
-    if total and total > len(choices):
-        lead += f" 처음 {len(choices)}개를 읽을게요."
-    return f"{lead} {listings}. 다시 불러서 번호나 제목을 말해 주세요."
+def _prompt(choices, page=0):
+    start = page * _PAGE_SIZE
+    end = start + _PAGE_SIZE
+    listings = ". ".join(
+        f"{index}번, {_title(video)[:55]}" for index, video in enumerate(choices[start:end], start + 1)
+    )
+    reply = f"유튜브 영상 탭이 {len(choices)}개 있어요. {listings}. 다시 불러서 번호나 제목을 말해 주세요."
+    pages = []
+    if start > 0:
+        pages.append("이전 목록")
+    if end < len(choices):
+        pages.append("다음 목록")
+    if pages:
+        reply += f" {'이나 '.join(pages)}도 요청할 수 있어요."
+    return reply
 
 
 def _describe(command, before, after):

@@ -150,6 +150,23 @@ class MediaAdapterTests(unittest.TestCase):
         self.assertIn("실행하지", adapter.handle("영상 멈추지 마"))
         self.assertEqual(transport.requests, [])
 
+    def test_replacement_ends_a_pending_selection_before_dispatch(self):
+        for text, receipts in (
+            ("멈추지 마", ()),
+            ("볼륨 101퍼센트", ()),
+            ("유튜브 열어", ({"op": "open", "ok": True, "url": "https://www.youtube.com/"},)),
+            ("유튜브에서 재즈 검색해", ({"op": "search", "ok": False, "error": "browser"},)),
+            ("소리 꺼", ("<unavailable>",)),
+        ):
+            with self.subTest(text=text):
+                adapter, _ = self.adapter(listed(FIRST, SECOND))
+                self.assertIn("2번", adapter.handle("영상 멈춰"))
+                adapter, transport = self.adapter(*receipts)
+                self.assertIsNotNone(adapter.handle(text))
+                self.assertFalse(adapter.recognizes("2번"))
+                self.assertIsNone(adapter.handle("2번"))
+                self.assertNotIn("pause", [request["op"] for request in transport.requests])
+
     def test_selects_unique_playing_video_for_verified_pause(self):
         playing = {**SECOND, "paused": False}
         adapter, transport = self.adapter(listed(FIRST, playing), changed("pause", playing, paused=True))
@@ -181,6 +198,44 @@ class MediaAdapterTests(unittest.TestCase):
             listed({**FIRST, "paused": False}, SECOND), changed("status", SECOND)
         )
         self.assertIn("오케스트라 합주", adapter.handle("지금 뭐 틀어져 있어?"))
+
+    def test_paginated_spoken_selection_keeps_original_order_across_workers(self):
+        videos = [{
+            **FIRST, "targetId": f"tab-{index}", "videoId": f"{index:011}",
+            "url": f"https://www.youtube.com/watch?v={index:011}",
+            "title": f"테스트 연주 {index}",
+        } for index in range(1, 41)]
+        adapter, _ = self.adapter(listed(*videos))
+        first = adapter.handle("소리 꺼")
+        self.assertIn("8번, 테스트 연주 8", first)
+        self.assertIn("다음 목록", first)
+        self.assertNotIn("9번, 테스트 연주 9", first)
+
+        adapter, transport = self.adapter()
+        self.assertTrue(adapter.recognizes("유튜브 다음 목록"))
+        second = adapter.handle("유튜브 다음 목록")
+        self.assertIn("9번, 테스트 연주 9", second)
+        self.assertIn("16번, 테스트 연주 16", second)
+        self.assertNotIn("17번, 테스트 연주 17", second)
+        self.assertEqual(transport.requests, [])
+
+        adapter, _ = self.adapter()
+        self.assertIn("17번, 테스트 연주 17", adapter.handle("다음 목록"))
+        adapter, _ = self.adapter()
+        self.assertIn("9번, 테스트 연주 9", adapter.handle("이전 목록"))
+
+        adapter, transport = self.adapter(
+            listed(*reversed(videos)), changed("mute", videos[8], muted=True)
+        )
+        self.assertEqual(adapter.handle("9번"), "영상의 소리를 껐어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], "tab-9")
+
+        self.state.unlink()
+        adapter, _ = self.adapter(listed(*videos))
+        adapter.handle("소리 꺼")
+        adapter, transport = self.adapter(listed(*videos), changed("mute", videos[-1], muted=True))
+        self.assertEqual(adapter.handle("테스트 연주 40"), "영상의 소리를 껐어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], "tab-40")
 
     def test_contextual_selection_accepts_unique_title(self):
         adapter, _ = self.adapter(listed(FIRST, SECOND))
@@ -291,7 +346,9 @@ class MediaScriptTests(unittest.TestCase):
         let calls = 0;
         let currentTime = 20;
         const player = {getVideoData: () => ({
-            video_id: new URL(location.href).searchParams.get("v")
+            video_id: (
+                ["missingID", "domID"].includes(fixture) || (fixture === "losesID" && calls)
+            ) ? undefined : new URL(location.href).searchParams.get("v")
         })};
         const video = {
             paused: false, muted: false, volume: 0.5, duration: 200,
@@ -309,7 +366,12 @@ class MediaScriptTests(unittest.TestCase):
                 });
             },
             removeEventListener() {},
-            closest: (selector) => selector === ".html5-video-player" ? player : null,
+            closest: (selector) => {
+                if (selector === ".html5-video-player") return player;
+                if (fixture === "domID" && selector.includes("[video-id]"))
+                    return {getAttribute: () => request.target.videoId};
+                return null;
+            },
             pause: () => {
                 calls++;
                 if (fixture === "changesAfter") location.href = replacement;
@@ -361,6 +423,24 @@ class MediaScriptTests(unittest.TestCase):
                 self.assertFalse(receipt["ok"])
                 self.assertEqual(receipt["error"], error)
                 self.assertEqual(calls, 0)
+
+    def test_static_script_requires_observed_player_id(self):
+        receipt, calls = self.run_script("missingID")
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["error"], "unloaded")
+        self.assertEqual(calls, 0)
+
+    def test_static_script_requires_player_id_during_readback(self):
+        receipt, calls = self.run_script("losesID")
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["error"], "unloaded")
+        self.assertEqual(calls, 1)
+
+    def test_static_script_accepts_observed_watch_ancestor_video_id(self):
+        receipt, calls = self.run_script("domID")
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["before"]["videoId"], FIRST["videoId"])
+        self.assertEqual(calls, 1)
 
     def test_static_script_waits_for_completed_seek_before_reading_position(self):
         receipt, _ = self.run_script("normal", "seek", value=10)

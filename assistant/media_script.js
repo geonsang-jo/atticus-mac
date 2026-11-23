@@ -40,12 +40,16 @@ async function observe(page, target, op, value) {
                 video.closest(".ad-showing, .ad-interrupting")) return {error: "unloaded"};
             const player = video.closest(".html5-video-player");
             const playingId = player?.getVideoData?.()?.video_id;
-            const watchId = document.querySelector("ytd-watch-flexy[video-id]")?.getAttribute("video-id");
-            if ((playingId && playingId !== target.videoId) || (watchId && watchId !== target.videoId)) {
+            const owner = video.closest("ytd-watch-flexy[video-id], ytd-reel-video-renderer[video-id]");
+            const ownerId = owner?.getAttribute("video-id");
+            const observedId = playingId || ownerId;
+            if (!observedId) return {error: "unloaded"};
+            if (observedId !== target.videoId || (ownerId && ownerId !== observedId)) {
                 return {error: "changed"};
             }
             return {
                 ...target,
+                videoId: observedId,
                 title: document.title.replace(/\s*[-–]\s*YouTube\s*$/i, "").slice(0, 180),
                 paused: video.paused,
                 muted: video.muted,
