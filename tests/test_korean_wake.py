@@ -136,6 +136,64 @@ roundTrip(start:true,result:true,stale:true)
 """
         self.assertEqual(swift_output(self, harness), ["false 1 1 true"] * 3 + ["true 0 0 false"])
 
+    def test_partials_wait_for_confirmation_in_assistant_mode(self):
+        # Use the native scheduling and finalization bodies, with receipts at the
+        # two worker boundaries. No process, audio input or browser is opened.
+        heard = SWIFT.split('trace.mark("first_frame") }\n            }\n        }', 1)[1].split('    // Whisper', 1)[0]
+        ahead = SWIFT[SWIFT.index('    func words()'):SWIFT.index('    // Runs `atticus.py --fast`')]
+        fast = SWIFT.split('    func tryFast()', 1)[1].split('        let p = py(["--fast"', 1)[0]
+        final = SWIFT.split('    func typed(', 1)[1].split('    func finish() {', 1)[1].split('    // atticus.py --wait', 1)[0]
+        native = """
+import Foundation
+enum Prefs {
+    static var assistant = true
+    static func bool(_ key:String) -> Bool { key == "assistantMode" ? assistant : true }
+}
+func transcriptKey(_ text:String) -> String { text.lowercased() }
+class Engine { var isRunning = true }
+class Panel { func makeKey() {}; func makeFirstResponder(_ x:Int) {} }
+class Drawing { var hasInput=false; func next() {} }
+struct SpeechSentences {}
+class Harness {
+    let engine=Engine(), panel=Panel(), drawing=Drawing(), web=0
+    var text="", consumed=0, consumedText="", liveRevised=false, clickTalk=true, whisperListen=false, toggleTalk=false
+    var pause: DispatchWorkItem?, aheadItem: DispatchWorkItem?, quiet: DispatchWorkItem?, ahead="", fastBusy=false
+    var selectionPending=false, pointContext:Int?, talkMoved=false, hints:[String]=[], warm:Int?
+    var busy=true, offerText:String?, drawingReply=false, stops=0, did:[String]=[], proc:Process?, commit="", pinned=false
+    var guardUntil=Date(), answer="", handsFree=false, speechSentences=SpeechSentences(), speechMuted=false, lastDone=Date()
+    var fast:[String]=[], speculative:[String]=[], confirmed:[String]=[]
+    func stop() {}; func pauseWait() -> Double? { 0.005 }
+    func spawn() -> Int? { 1 }; func dropAhead() { ahead = "" }
+    func run(_ s:String,speculative:Bool=false,remaining:String?=nil) {
+        if speculative { self.speculative.append(s) } else { confirmed.append(s) }
+    }
+    func unwarm() {}; func hush() {}; func hush(keepReply:Bool,keepWarm:Bool) {}; func typed(_ s:String,heard:Bool) {}
+    func js(_ n:String, _ v:String="") {}; func settleTalkPointer() {}; func cancel() {}
+    func hide(after:Double) {}; func cue(_ s:String) {}; func deliver(_ s:String) {}; func linger(_ v:Double)->Double {v}
+    func received(_ partial:String) { text = partial
+""" + heard + ahead + '    func tryFast()' + fast + """
+        fast.append(seg)
+    }
+    func finish() {
+""" + final + """
+}
+func pump() { RunLoop.current.run(until:Date().addingTimeInterval(0.04)) }
+let app=Harness()
+app.received("search YouTube"); pump()
+app.received("유튜브에서 재즈"); pump()
+app.tryFast(); app.startAhead()   // previously queued work must observe the current mode, too
+print("partial", app.fast.count, app.speculative.count, app.pause == nil, app.aheadItem == nil, app.quiet != nil)
+app.received("search YouTube for jazz"); app.engine.isRunning=false; app.finish()
+print("final", app.confirmed)
+Prefs.assistant=false
+let legacy=Harness(); legacy.received("search YouTube"); pump()
+legacy.received("유튜브에서 재즈"); pump()
+print("legacy", legacy.fast, legacy.speculative)
+"""
+        self.assertEqual(swift_output(self, native), [
+            "partial 0 0 true true true", 'final ["search YouTube for jazz"]',
+            'legacy ["search YouTube", "유튜브에서 재즈"] ["유튜브에서 재즈"]'])
+
     def test_chime_follows_open_command_microphone(self):
         start = SWIFT.split("    func start(dictate: Bool, quiet: Bool = false)", 1)[1].split("    func heard(", 1)[0]
         self.assertLess(start.index("engine.start(device"), start.index('cue("soundStart")'))

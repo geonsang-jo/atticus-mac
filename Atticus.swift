@@ -4598,6 +4598,11 @@ final class App: NSObject, WKScriptMessageHandler {
                 if case .success = result { trace.mark("first_frame") }
             }
         }
+        if clickTalk && !whisperListen {   // no keys to let go of: a 1.3 s pause ends it (Whisper: the listen timer, on the audio)
+            quiet?.cancel(); let q = DispatchWorkItem { [weak self] in self?.stop() }; quiet = q
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: q)
+        }
+        guard !Prefs.bool("assistantMode") else { return }   // even a short prefix can be a different command
         let wait = pauseWait()   // nil: Whisper still hears a voice
         if consumed > 0 && transcriptKey(words().prefix(consumed).joined(separator: " ")) != consumedText { liveRevised = true }
         if Prefs.bool("live") {   // instant commands (open, move, search, play) run mid-sentence; the AI still waits for confirmed words
@@ -4605,10 +4610,6 @@ final class App: NSObject, WKScriptMessageHandler {
             let item = DispatchWorkItem { [weak self] in self?.tryFast() }
             pause = item
             if let wait { DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: item) }
-        }
-        if clickTalk && !whisperListen {   // no keys to let go of: a 1.3 s pause ends it (Whisper: the listen timer, on the audio)
-            quiet?.cancel(); let q = DispatchWorkItem { [weak self] in self?.stop() }; quiet = q
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: q)
         }
         if !ahead.isEmpty && transcriptKey(rest()) != transcriptKey(ahead) { dropAhead() }   // the user kept talking: that start was for half a sentence
         aheadItem?.cancel()   // a longer pause = the user is probably done: start the AI now, keys still held
@@ -4640,6 +4641,7 @@ final class App: NSObject, WKScriptMessageHandler {
     func rest() -> String { let w = words(); return w.count > consumed ? w[consumed...].joined(separator: " ") : "" }
 
     func startAhead() {
+        guard !Prefs.bool("assistantMode") else { return }
         if drawing.hasInput || pointContext != nil || talkMoved { return }   // the marked crop belongs to the confirmed request, not a discarded speculative start
         if engine.isRunning && selectionPending {
             let item = DispatchWorkItem { [weak self] in self?.startAhead() }; aheadItem = item
@@ -4659,6 +4661,7 @@ final class App: NSObject, WKScriptMessageHandler {
     func cancelFast() { fastProc?.terminate(); fastProc = nil; fastBusy = false }
 
     func tryFast() {
+        guard !Prefs.bool("assistantMode") else { return }
         // A held ask can still point after these partial words; act only after classification on release.
         let w = words()
         guard Prefs.bool("live"), Prefs.bool("instant"), engine.isRunning, (clickTalk || toggleTalk), !drawing.hasInput, !fastBusy, !liveRevised, w.count > consumed else { return }

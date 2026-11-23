@@ -43,7 +43,7 @@ else:
     swift.write_text('''import Foundation
 var delay = "0.1", flood = "0", bench = false
 let root = CommandLine.arguments[1], repo = CommandLine.arguments[2], python = CommandLine.arguments[3]
-struct Prefs { static var live = true; static func bool(_ k: String) -> Bool { k != "live" || live } }
+struct Prefs { static var live = true; static func bool(_ k: String) -> Bool { k != "assistantMode" && (k != "live" || live) } }
 final class Engine { var isRunning = true }
 final class DrawingStub { var hasInput = false }
 func py(_ args: [String], _ extra: [String: String] = [:]) -> Process {
