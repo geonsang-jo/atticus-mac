@@ -24,6 +24,7 @@ from .sessions import SessionStream
 
 _MAX_WATCHES = 16
 _MAX_NOTIFICATIONS = 64
+_MAX_NOTIFICATION_ID = 200
 _SELECTION_SECONDS = 120
 _PAGE_SIZE = 8
 _STREAM_SECONDS = 50
@@ -110,6 +111,36 @@ def _receipt(state, identifier, reply, kind):
     if all(item["id"] != identifier for item in queue):
         queue.append({"id": identifier, "text": reply, "kind": kind})
         del queue[:-_MAX_NOTIFICATIONS]
+
+
+def peek_notifications() -> list[dict]:
+    """Read pending notifications without changing their delivery state."""
+    try:
+        # os.replace makes the queue visible as a complete snapshot to readers.
+        return _read_state(_state_path() / "state.json").get("notifications", [])
+    except (OSError, ValueError):
+        return []
+
+
+def ack_notifications(ids: list[str]) -> int:
+    """Acknowledge exactly the delivered notification IDs in one transaction."""
+    if not isinstance(ids, list) or len(ids) > _MAX_NOTIFICATIONS or any(
+        not isinstance(identifier, str) or not 1 <= len(identifier) <= _MAX_NOTIFICATION_ID
+        or not identifier.isprintable() or identifier.strip() != identifier
+        for identifier in ids
+    ):
+        raise ValueError("Invalid notification IDs")
+    delivered = set(ids)
+    if not delivered:
+        return 0
+    queue = _read_state(_state_path() / "state.json").get("notifications", [])
+    if not any(item["id"] in delivered for item in queue):
+        return 0
+    with _state(write=True) as state:
+        queue = state.get("notifications", [])
+        pending = [item for item in queue if item["id"] not in delivered]
+        state["notifications"] = pending
+        return len(queue) - len(pending)
 
 
 def pop_notifications() -> list[dict]:
@@ -258,7 +289,7 @@ def _daemon_lease(inherited):
         raise ValueError("Invalid daemon lease descriptor")
     info = os.fstat(fd)
     path = _private_directory() / "daemon.lock"
-    if not os.path.samestat(info, path.stat(follow_symlinks=False)) or not stat.S_ISREG(info.st_mode):
+    if not os.path.samestat(info, path.lstat()) or not stat.S_ISREG(info.st_mode):
         raise ValueError("Invalid daemon lease identity")
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     os.set_inheritable(fd, False)

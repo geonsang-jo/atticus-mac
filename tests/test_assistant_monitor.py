@@ -1,7 +1,9 @@
+import json
 import multiprocessing
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -161,3 +163,31 @@ else:
         self.assertIn("9번 fixture t9", monitor.handle("다음 세션 목록"))
         self.assertIn("1번 fixture t1", monitor.handle("이전 세션 목록"))
         self.assertIn("t9", monitor.handle("세션 9번"))
+
+    def test_notification_peek_is_repeatable_and_survives_process_restart(self):
+        self.assertEqual(monitor.peek_notifications(), [])
+        self.assertFalse((Path(self.directory) / "assistant").exists())
+        with monitor._state(write=True) as state:
+            monitor._receipt(state, "test:fixture", "fixture finished", "test")
+            monitor._receipt(state, "test:fixture-more", "other fixture finished", "test")
+        notices = monitor.peek_notifications()
+        self.assertEqual(monitor.peek_notifications(), notices)
+        self.assertEqual(len(notices), 2)
+        restarted = subprocess.check_output([sys.executable, "-c",
+            "import json; from assistant.monitor import peek_notifications; print(json.dumps(peek_notifications()))"])
+        self.assertEqual(json.loads(restarted), notices)
+        self.assertEqual(monitor.ack_notifications(["test:fixture", "test:unknown"]), 1)
+        self.assertEqual(monitor.peek_notifications(), notices[1:])
+        self.assertEqual(monitor.ack_notifications(["test:fixture", "test:fixture"]), 0)
+        self.assertEqual(monitor.pop_notifications(), notices[1:])
+        self.assertEqual(monitor.peek_notifications(), [])
+
+    def test_ack_validates_entire_batch_before_removing_any_receipt(self):
+        with monitor._state(write=True) as state:
+            monitor._receipt(state, "test:fixture", "fixture finished", "test")
+        for invalid in ("test:fixture", ["test:fixture", ""], ["test:fixture", 1],
+                        ["test:fixture", "x" * 201], ["test:fixture", "has\nnewline"], ["test:fixture"] * 65):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                monitor.ack_notifications(invalid)
+        self.assertEqual(monitor.ack_notifications([]), 0)
+        self.assertEqual([notice["id"] for notice in monitor.peek_notifications()], ["test:fixture"])
