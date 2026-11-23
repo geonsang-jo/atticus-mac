@@ -512,11 +512,15 @@ class MediaScriptTests(unittest.TestCase):
         const fs = require("node:fs");
         const request = JSON.parse(process.argv[1]);
         const fixture = process.argv[2];
-        const original = request.target.url;
+        const source = JSON.parse(process.argv[4]);
+        const original = source.url;
         const replacement = "https://www.youtube.com/watch?v=AAAAAAAAAAA";
         const location = globalThis.location = {href: original};
         let calls = 0;
         let currentTime = 20;
+        const attached = new Set();
+        const closed = [];
+        const opened = [];
         const shortsPage = new URL(original).pathname.startsWith("/shorts/");
         const player = {getVideoData: () => ({
             video_id: (
@@ -547,14 +551,15 @@ class MediaScriptTests(unittest.TestCase):
                 if (selector === "#movie_player" && !shortsPage) return player;
                 if (selector === "ytd-watch-flexy, ytm-watch" && !shortsPage) return {};
                 if (fixture === "domID" && selector.includes("[video-id]"))
-                    return {getAttribute: () => request.target.videoId};
+                    return {getAttribute: () => source.videoId};
                 if (shortsPage && selector.startsWith("ytd-reel-video-renderer"))
                     return {hasAttribute: () => true};
                 return null;
             },
             pause: () => {
                 calls++;
-                if (fixture === "changesAfter") location.href = replacement;
+                if (["changesAfter", "cleanupFailsAfterChange"].includes(fixture))
+                    location.href = replacement;
                 video.paused = true;
             },
         };
@@ -576,92 +581,147 @@ class MediaScriptTests(unittest.TestCase):
         const videos = fixture === "noPlayer" ? [] : [video];
         if (fixture === "watchPreviews") {
             videos.push(extraVideo("shorts-player", "AAAAAAAAAAA", 0));
-            videos.push(extraVideo("inline-preview-player", request.target.videoId, 0));
+            videos.push(extraVideo("inline-preview-player", source.videoId, 0));
         }
-        if (fixture === "twoMainPlayers") videos.push(extraVideo("movie_player", request.target.videoId, 400));
+        if (fixture === "twoMainPlayers") videos.push(extraVideo("movie_player", source.videoId, 400));
         if (fixture === "hiddenShort") videos.push(extraVideo("shorts-player", "AAAAAAAAAAA", 0, true));
         globalThis.document = {
             title: "Fixture - YouTube",
             querySelector: () => null,
             querySelectorAll: () => videos,
         };
-        const listBrowserTabs = async () => [{
-            targetId: request.target.targetId, url: location.href, title: document.title,
+        const listBrowserTabs = async () => fixture === "tabGoneAfter" && calls ? [] : [{
+            targetId: source.targetId, url: location.href, title: document.title,
         }];
-        const attachBrowserTab = async () => ({
-            evaluate: async (fn, arg) => {
-                if (fixture === "changesBefore") location.href = replacement;
-                return fn(arg);
-            },
-        });
+        const attachBrowserTab = async () => {
+            const page = {
+                evaluate: async (fn, arg) => {
+                    if (fixture === "changesBefore") location.href = replacement;
+                    if (fixture === "evaluateThrows") throw new Error("player unavailable");
+                    return fn(arg);
+                },
+            };
+            attached.add(page);
+            return page;
+        };
+        const closeTab = async page => {
+            closed.push(attached.has(page) ? "borrowed" : "unowned");
+            if (fixture.startsWith("cleanupFails")) throw new Error("cleanup unavailable");
+        };
+        const openTab = async url => {
+            opened.push(url);
+            return {url: () => url};
+        };
         const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
         const script = fs.readFileSync(process.argv[3], "utf8");
-        const run = new AsyncFunction("request", "listBrowserTabs", "attachBrowserTab", script);
-        run(request, listBrowserTabs, attachBrowserTab)
-            .then(() => console.log(JSON.stringify({calls})));
+        const run = new AsyncFunction("request", "listBrowserTabs", "attachBrowserTab", "closeTab", "openTab", script);
+        run(request, listBrowserTabs, attachBrowserTab, closeTab, openTab)
+            .then(() => console.log(JSON.stringify({calls, closed, opened, attached: attached.size})));
     """
 
     def run_script(self, fixture, op="pause", source=FIRST, **params):
         self.assertTrue(SCRIPT.is_file(), "The Aside action script is missing")
-        request = {"op": op, "target": {key: source[key] for key in ("targetId", "url", "videoId")}, **params}
+        target = {key: source[key] for key in ("targetId", "url", "videoId")}
+        request = {"op": op, **params}
+        if op not in {"list", "open", "search"}:
+            request["target"] = target
         process = subprocess.run(
-            ["node", "-e", self.HARNESS, json.dumps(request), fixture, str(SCRIPT)],
+            ["node", "-e", self.HARNESS, json.dumps(request), fixture, str(SCRIPT), json.dumps(target)],
             capture_output=True, check=True, text=True, timeout=3,
         )
         receipt, details = [json.loads(line) for line in process.stdout.splitlines()]
-        return receipt["atticusMedia"], details["calls"]
+        return receipt["atticusMedia"], details
+
+    def test_static_script_releases_borrowed_player_after_listing_or_action(self):
+        for op, fixture, error in (
+            ("list", "normal", None),
+            ("list", "evaluateThrows", None),
+            ("pause", "normal", None),
+            ("pause", "evaluateThrows", "browser"),
+            ("pause", "changesBefore", "changed"),
+            ("pause", "changesAfter", "changed"),
+            ("pause", "tabGoneAfter", "missing"),
+        ):
+            with self.subTest(op=op, fixture=fixture):
+                receipt, details = self.run_script(fixture, op)
+                self.assertEqual(receipt.get("error"), error)
+                self.assertEqual(details["attached"], 1)
+                self.assertEqual(details["closed"], ["borrowed"])
+
+    def test_static_script_cleanup_failure_does_not_mask_receipt(self):
+        succeeded, details = self.run_script("cleanupFails")
+        self.assertTrue(succeeded["ok"])
+        self.assertTrue(succeeded["after"]["paused"])
+        self.assertEqual(details["closed"], ["borrowed"])
+
+        failed, details = self.run_script("cleanupFailsAfterChange")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["error"], "changed")
+        self.assertEqual(details["closed"], ["borrowed"])
+
+    def test_static_script_leaves_new_navigation_tabs_open(self):
+        for op, url in (
+            ("open", "https://www.youtube.com/"),
+            ("search", "https://www.youtube.com/results?search_query=jazz"),
+        ):
+            with self.subTest(op=op):
+                receipt, details = self.run_script("normal", op, url=url)
+                self.assertEqual(receipt, {"op": op, "ok": True, "url": url})
+                self.assertEqual(details["opened"], [url])
+                self.assertEqual(details["attached"], 0)
+                self.assertEqual(details["closed"], [])
 
     def test_static_script_reads_actual_paused_player(self):
-        receipt, calls = self.run_script("normal")
+        receipt, details = self.run_script("normal")
         self.assertTrue(receipt["ok"])
         self.assertIs(receipt["before"]["paused"], False)
         self.assertIs(receipt["after"]["paused"], True)
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
     def test_static_script_chooses_watch_player_over_hidden_shorts_and_preview(self):
-        receipt, calls = self.run_script("watchPreviews")
+        receipt, details = self.run_script("watchPreviews")
         self.assertTrue(receipt["ok"])
         self.assertEqual(receipt["after"]["videoId"], FIRST["videoId"])
         self.assertTrue(receipt["after"]["paused"])
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
     def test_static_script_refuses_two_visible_main_players(self):
-        receipt, calls = self.run_script("twoMainPlayers")
+        receipt, details = self.run_script("twoMainPlayers")
         self.assertFalse(receipt["ok"])
         self.assertEqual(receipt["error"], "unloaded")
-        self.assertEqual(calls, 0)
+        self.assertEqual(details["calls"], 0)
 
     def test_static_script_chooses_only_visible_active_short(self):
-        receipt, calls = self.run_script("hiddenShort", source=SECOND)
+        receipt, details = self.run_script("hiddenShort", source=SECOND)
         self.assertTrue(receipt["ok"])
         self.assertEqual(receipt["after"]["videoId"], SECOND["videoId"])
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
     def test_static_script_does_not_touch_wrong_video_or_unloaded_player(self):
         for fixture, error in [("changesBefore", "changed"), ("noPlayer", "unloaded")]:
             with self.subTest(fixture=fixture):
-                receipt, calls = self.run_script(fixture)
+                receipt, details = self.run_script(fixture)
                 self.assertFalse(receipt["ok"])
                 self.assertEqual(receipt["error"], error)
-                self.assertEqual(calls, 0)
+                self.assertEqual(details["calls"], 0)
 
     def test_static_script_requires_observed_player_id(self):
-        receipt, calls = self.run_script("missingID")
+        receipt, details = self.run_script("missingID")
         self.assertFalse(receipt["ok"])
         self.assertEqual(receipt["error"], "unloaded")
-        self.assertEqual(calls, 0)
+        self.assertEqual(details["calls"], 0)
 
     def test_static_script_requires_player_id_during_readback(self):
-        receipt, calls = self.run_script("losesID")
+        receipt, details = self.run_script("losesID")
         self.assertFalse(receipt["ok"])
         self.assertEqual(receipt["error"], "unloaded")
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
     def test_static_script_accepts_observed_watch_ancestor_video_id(self):
-        receipt, calls = self.run_script("domID")
+        receipt, details = self.run_script("domID")
         self.assertTrue(receipt["ok"])
         self.assertEqual(receipt["before"]["videoId"], FIRST["videoId"])
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
     def test_static_script_waits_for_completed_seek_before_reading_position(self):
         receipt, _ = self.run_script("normal", "seek", value=10)
@@ -670,10 +730,10 @@ class MediaScriptTests(unittest.TestCase):
         self.assertEqual(receipt["after"]["currentTime"], 30)
 
     def test_static_script_detects_replacement_after_action(self):
-        receipt, calls = self.run_script("changesAfter")
+        receipt, details = self.run_script("changesAfter")
         self.assertFalse(receipt["ok"])
         self.assertEqual(receipt["error"], "changed")
-        self.assertEqual(calls, 1)
+        self.assertEqual(details["calls"], 1)
 
 
 if __name__ == "__main__":

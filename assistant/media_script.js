@@ -123,6 +123,20 @@ async function observe(page, target, op, value) {
     }, {target, op, value});
 }
 
+async function observeBorrowed(target, op, value) {
+    const page = await attachBrowserTab(target.targetId);
+    try {
+        return await observe(page, target, op, value);
+    } finally {
+        try {
+            // Aside detaches a borrowed tab and leaves the original browser tab open.
+            await closeTab(page);
+        } catch {
+            // Cleanup failure cannot change the observed player result.
+        }
+    }
+}
+
 async function getVideos() {
     const tabs = (await listBrowserTabs()).flatMap(tab => {
         const identity = tabIdentity(tab);
@@ -132,8 +146,7 @@ async function getVideos() {
     const videos = [];
     for (const tab of tabs) {
         try {
-            const page = await attachBrowserTab(tab.targetId);
-            const result = await observe(page, tab, "status");
+            const result = await observeBorrowed(tab, "status");
             videos.push(result.after ?? tab);
         } catch {
             videos.push(tab);
@@ -155,8 +168,7 @@ async function applyToVideo({op, target, value}) {
     if (!tab || !sameTarget(tabIdentity(tab), target)) {
         return {ok: false, error: tab ? "changed" : "missing"};
     }
-    const page = await attachBrowserTab(target.targetId);
-    const result = await observe(page, target, op, value);
+    const result = await observeBorrowed(target, op, value);
     if (result.error) return {ok: false, error: result.error};
     const current = (await listBrowserTabs()).find(tab => tab.targetId === target.targetId);
     if (!current || !sameTarget(tabIdentity(current), target)) {
