@@ -237,6 +237,7 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
             self.assertEqual(atticus.agent_model(), 'custom')
 
     def routing_ask(self, prefs, outcomes, *, quick=None, retry='n', tip=None, why='', guide=None, restored=None, warm=False, task='Open Fixture'):
+        prefs = {'assistantMode': False, **prefs}
         worker = unittest.mock.Mock(ask=str(self.root/'warm'), atticus_model='haiku') if warm else None
         if worker: Path(worker.ask).mkdir(exist_ok=True)
         def attempt(*args, **kwargs):
@@ -600,7 +601,7 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
                                     selection_context=lambda: '', relevant_rules=lambda _: '', recent=lambda: [],
                                     workflows=lambda *a: '', screen_for=lambda *a: None, wait_commit=lambda: True,
                                     run=brain, start_ai=lambda *a: None, remember_turn=unittest.mock.Mock()), \
-                     patch.object(atticus,'pref',side_effect=lambda k,d: {'escalateAuto':True}.get(k,d)), \
+                     patch.object(atticus,'pref',side_effect=lambda k,d: {'escalateAuto':True, 'assistantMode':False}.get(k,d)), \
                      patch.object(atticus,'log_turn') as log,patch.object(atticus,'remember_workflow') as learn, \
                      patch.object(atticus.threading,'Thread'),patch.dict(os.environ,{'ATTICUS_UI':'1','ATTICUS_ASK':atticus.DIR}), \
                      patch('sys.argv',['atticus.py','Open Fixture']),patch('sys.stdout',io.StringIO()):
@@ -682,7 +683,7 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
                             screen_for=lambda *a: None, wait_commit=lambda: True, run=brain, unlearn=lambda *a: None,
                             remember_turn=lambda *a: None, restore_focus=lambda *a: None, POSTHOG_KEY='fixture-token',
                             remember_workflow=lambda task, reply, *a: (reply, False), learn=lambda *a: False, tip=lambda *a: None), \
-             patch.object(atticus, 'pref', side_effect=lambda k, d: True if k == 'improve' else d), \
+             patch.object(atticus, 'pref', side_effect=lambda k, d: {'improve': True, 'assistantMode': False}.get(k, d)), \
              patch.object(atticus, 'posthog') as sent, patch.object(atticus.threading, 'Thread'), \
              patch('sys.argv', ['atticus.py', 'no, I meant the work inbox']), patch('sys.stdout', io.StringIO()):
             atticus.main()
