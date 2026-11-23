@@ -30,6 +30,8 @@ _MAX_STATE_SIZE = 262_144
 _PAGE_MOVES = {"다음 목록": 1, "이전 목록": -1}
 _UNVERIFIED = "Aside에서 유튜브 동작을 확인할 수 없어요."
 _PLAYER_UNAVAILABLE = "유튜브 플레이어 상태를 확인할 수 없어요."
+_CLEANUP_FAILED = "Aside 탭 연결을 해제하지 못했어요."
+_LIST_STOPPED = "Aside 탭 연결을 해제하지 못해 유튜브 요청을 중단했어요."
 _REJECTED = "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
 _CAPABILITIES = "유튜브 열기와 검색, 열린 영상의 재생·정지, 소리와 시간 조절, 제목 확인을 지원해요."
 
@@ -423,12 +425,14 @@ class AsideMedia:
 
     def _videos(self):
         receipt = self._request({"op": "list"})
+        if receipt and receipt.get("error") == "cleanup":
+            return None, _LIST_STOPPED
         if not receipt or receipt.get("ok") is not True or not isinstance(receipt.get("videos"), list):
-            return None
+            return None, _UNVERIFIED
         videos = [video for video in receipt["videos"] if _identity(video)]
         if len(videos) > _MAX_OPTIONS or len({video["targetId"] for video in videos}) != len(videos):
-            return None
-        return videos
+            return None, _UNVERIFIED
+        return videos, None
 
     def _apply(self, command, video):
         action = command.action
@@ -437,14 +441,16 @@ class AsideMedia:
         if command.value is not None:
             request["value"] = command.value
         receipt = self._request(request)
+        notice = f" {_CLEANUP_FAILED}" if receipt and receipt.get("cleanup") is False else ""
         if not receipt or receipt.get("ok") is not True:
-            return _PLAYER_UNAVAILABLE if receipt and receipt.get("error") == "unloaded" else _UNVERIFIED
+            reply = _PLAYER_UNAVAILABLE if receipt and receipt.get("error") == "unloaded" else _UNVERIFIED
+            return reply + notice
         before, after = receipt.get("before"), receipt.get("after")
         if _identity(before) != target or _identity(after) != target:
-            return _UNVERIFIED
+            return _UNVERIFIED + notice
         if not _player_state(before) or not _player_state(after):
-            return _PLAYER_UNAVAILABLE
-        return _describe(command, before, after)
+            return _PLAYER_UNAVAILABLE + notice
+        return _describe(command, before, after) + notice
 
     def _follow_up(self, text, state):
         pending = _pending(state)
@@ -475,9 +481,9 @@ class AsideMedia:
         if len(indices) != 1:
             return _prompt(choices, page)
 
-        videos = self._videos()
-        if videos is None:
-            return _UNVERIFIED
+        videos, failure = self._videos()
+        if failure:
+            return failure
         target = _identity(choices[indices[0]])
         state.pop("pending", None)
         video = next((video for video in videos if _identity(video) == target), None)
@@ -489,9 +495,9 @@ class AsideMedia:
         return self._apply(command, video)
 
     def _handle_player(self, command, state):
-        videos = self._videos()
-        if videos is None:
-            return _UNVERIFIED
+        videos, failure = self._videos()
+        if failure:
+            return failure
         if not videos:
             return "Aside에 열린 유튜브 영상 탭이 없어요."
         selected = _identity(state.get("selected"))

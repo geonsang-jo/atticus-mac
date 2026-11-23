@@ -233,6 +233,18 @@ class MediaAdapterTests(unittest.TestCase):
                 self.assertIsNone(adapter.handle("2번"))
                 self.assertNotIn("pause", [request["op"] for request in transport.requests])
 
+    def test_list_release_failure_stops_without_player_action(self):
+        adapter, transport = self.adapter({"op": "list", "ok": False, "error": "cleanup"})
+        self.assertIn("탭 연결을 해제하지 못해", adapter.handle("영상 멈춰"))
+        self.assertEqual(transport.requests, [{"op": "list"}])
+
+    def test_action_release_failure_is_reported_alongside_observed_state(self):
+        receipt = {**changed("pause", FIRST, paused=True), "cleanup": False}
+        adapter, _ = self.adapter(listed(FIRST), receipt)
+        reply = adapter.handle("영상 멈춰")
+        self.assertIn("일시 정지했어요", reply)
+        self.assertIn("탭 연결을 해제하지 못했어요", reply)
+
     def test_selects_unique_playing_video_for_verified_pause(self):
         playing = {**SECOND, "paused": False}
         adapter, transport = self.adapter(listed(FIRST, playing), changed("pause", playing, paused=True))
@@ -590,17 +602,25 @@ class MediaScriptTests(unittest.TestCase):
             querySelector: () => null,
             querySelectorAll: () => videos,
         };
-        const listBrowserTabs = async () => fixture === "tabGoneAfter" && calls ? [] : [{
-            targetId: source.targetId, url: location.href, title: document.title,
-        }];
+        const listBrowserTabs = async () => {
+            if (fixture === "tabGoneAfter" && calls) return [];
+            const tabs = [{targetId: source.targetId, url: location.href, title: document.title}];
+            if (fixture === "cleanupFailsWithMoreTabs") {
+                tabs.push({targetId: "tab-next", url: replacement, title: "Next"});
+            }
+            return tabs;
+        };
+        const makePage = () => ({
+            evaluate: async (fn, arg) => {
+                if (fixture === "changesBefore") location.href = replacement;
+                if (fixture === "evaluateThrows") throw new Error("player unavailable");
+                return fn(arg);
+            },
+        });
+        const preexisting = fixture === "preexisting" ? makePage() : null;
+        const getTabByTargetId = targetId => targetId === source.targetId ? preexisting : null;
         const attachBrowserTab = async () => {
-            const page = {
-                evaluate: async (fn, arg) => {
-                    if (fixture === "changesBefore") location.href = replacement;
-                    if (fixture === "evaluateThrows") throw new Error("player unavailable");
-                    return fn(arg);
-                },
-            };
+            const page = makePage();
             attached.add(page);
             return page;
         };
@@ -614,8 +634,10 @@ class MediaScriptTests(unittest.TestCase):
         };
         const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
         const script = fs.readFileSync(process.argv[3], "utf8");
-        const run = new AsyncFunction("request", "listBrowserTabs", "attachBrowserTab", "closeTab", "openTab", script);
-        run(request, listBrowserTabs, attachBrowserTab, closeTab, openTab)
+        const run = new AsyncFunction(
+            "request", "listBrowserTabs", "getTabByTargetId", "attachBrowserTab", "closeTab", "openTab", script
+        );
+        run(request, listBrowserTabs, getTabByTargetId, attachBrowserTab, closeTab, openTab)
             .then(() => console.log(JSON.stringify({calls, closed, opened, attached: attached.size})));
     """
 
@@ -648,15 +670,31 @@ class MediaScriptTests(unittest.TestCase):
                 self.assertEqual(details["attached"], 1)
                 self.assertEqual(details["closed"], ["borrowed"])
 
+    def test_static_script_stops_listing_after_failed_release(self):
+        receipt, details = self.run_script("cleanupFailsWithMoreTabs", "list")
+        self.assertEqual(receipt, {"op": "list", "ok": False, "error": "cleanup"})
+        self.assertEqual(details["attached"], 1)
+        self.assertEqual(details["closed"], ["borrowed"])
+
+    def test_static_script_reuses_a_preexisting_session_page_without_detaching(self):
+        for op in ("list", "pause"):
+            with self.subTest(op=op):
+                receipt, details = self.run_script("preexisting", op)
+                self.assertTrue(receipt["ok"])
+                self.assertEqual(details["attached"], 0)
+                self.assertEqual(details["closed"], [])
+
     def test_static_script_cleanup_failure_does_not_mask_receipt(self):
         succeeded, details = self.run_script("cleanupFails")
         self.assertTrue(succeeded["ok"])
         self.assertTrue(succeeded["after"]["paused"])
+        self.assertIs(succeeded.get("cleanup"), False)
         self.assertEqual(details["closed"], ["borrowed"])
 
         failed, details = self.run_script("cleanupFailsAfterChange")
         self.assertFalse(failed["ok"])
         self.assertEqual(failed["error"], "changed")
+        self.assertIs(failed.get("cleanup"), False)
         self.assertEqual(details["closed"], ["borrowed"])
 
     def test_static_script_leaves_new_navigation_tabs_open(self):

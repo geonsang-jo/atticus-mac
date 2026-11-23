@@ -123,18 +123,34 @@ async function observe(page, target, op, value) {
     }, {target, op, value});
 }
 
-async function observeBorrowed(target, op, value) {
-    const page = await attachBrowserTab(target.targetId);
+async function observeConnected(target, op, value) {
+    let page;
     try {
-        return await observe(page, target, op, value);
+        page = await getTabByTargetId(target.targetId);
+    } catch {
+        // The target is not yet attached to this REPL session.
+    }
+    const borrowed = !page;
+    if (borrowed) page = await attachBrowserTab(target.targetId);
+
+    let result;
+    let cleanup = true;
+    try {
+        result = await observe(page, target, op, value);
+    } catch {
+        result = {error: "browser"};
     } finally {
-        try {
-            // Aside detaches a borrowed tab and leaves the original browser tab open.
-            await closeTab(page);
-        } catch {
-            // Cleanup failure cannot change the observed player result.
+        if (borrowed) {
+            try {
+                // Aside detaches a borrowed tab and leaves the original browser tab open.
+                const released = await closeTab(page);
+                cleanup = released !== false && released?.ok !== false;
+            } catch {
+                cleanup = false;
+            }
         }
     }
+    return {result, cleanup};
 }
 
 async function getVideos() {
@@ -146,7 +162,8 @@ async function getVideos() {
     const videos = [];
     for (const tab of tabs) {
         try {
-            const result = await observeBorrowed(tab, "status");
+            const {result, cleanup} = await observeConnected(tab, "status");
+            if (!cleanup) return {ok: false, error: "cleanup"};
             videos.push(result.after ?? tab);
         } catch {
             videos.push(tab);
@@ -168,13 +185,19 @@ async function applyToVideo({op, target, value}) {
     if (!tab || !sameTarget(tabIdentity(tab), target)) {
         return {ok: false, error: tab ? "changed" : "missing"};
     }
-    const result = await observeBorrowed(target, op, value);
-    if (result.error) return {ok: false, error: result.error};
-    const current = (await listBrowserTabs()).find(tab => tab.targetId === target.targetId);
-    if (!current || !sameTarget(tabIdentity(current), target)) {
-        return {ok: false, error: current ? "changed" : "missing"};
+    const {result, cleanup} = await observeConnected(target, op, value);
+    const release = cleanup ? {} : {cleanup: false};
+    if (result.error) return {ok: false, error: result.error, ...release};
+    let current;
+    try {
+        current = (await listBrowserTabs()).find(tab => tab.targetId === target.targetId);
+    } catch {
+        return {ok: false, error: "browser", ...release};
     }
-    return {ok: true, ...result};
+    if (!current || !sameTarget(tabIdentity(current), target)) {
+        return {ok: false, error: current ? "changed" : "missing", ...release};
+    }
+    return {ok: true, ...result, ...release};
 }
 
 async function dispatch(command) {
