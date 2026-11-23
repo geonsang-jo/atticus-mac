@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import atticus
-from assistant import commands
+from assistant import commands, media
 
 
 class AssistantRouterTests(unittest.TestCase):
@@ -81,6 +81,25 @@ class AssistantBoundaryTests(unittest.TestCase):
         self.assertIn('영상을 멈췄어요.', output.getvalue())
         ai.assert_not_called()
         screen.assert_not_called()
+
+    def test_spoken_tab_choice_without_prompt_cannot_use_generic_keyboard_actions(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             patch.dict(os.environ, {'ATTICUS_DIR': folder}), \
+             patch('sys.argv', ['atticus.py', '--wait']), \
+             patch('sys.stdin', io.StringIO('Finder\t첫 번째 탭으로 해 줘.\n')), \
+             patch('sys.stdout', new_callable=io.StringIO) as output, \
+             patch.object(atticus, 'pref', side_effect=lambda key, default: default), \
+             patch.object(atticus.threading, 'Thread'), patch.object(atticus, 'start_ai') as ai, \
+             patch.object(atticus, 'window_summary') as screen, patch.object(atticus, 'fast_hands') as hands, \
+             patch.object(atticus, 'point_context', side_effect=AssertionError('generic AI path was entered')), \
+             patch.object(atticus, 'wait_commit', return_value=True), \
+             patch.object(media.AsideMedia, '_request') as browser:
+            atticus.main()
+        self.assertIn('유튜브 탭 목록', output.getvalue())
+        ai.assert_not_called()
+        screen.assert_not_called()
+        hands.assert_not_called()
+        browser.assert_not_called()
 
     def test_live_partial_cannot_execute_or_fall_through_to_english_actions(self):
         with patch.dict(os.environ, {'ATTICUS_LIVE': '1'}), \

@@ -61,6 +61,12 @@ _PLAYER_ACTIONS = {
 _YOUTUBE = r"(?:유튜브|(?<![A-Za-z0-9_])you ?tube(?![A-Za-z0-9_]))"
 _YOUTUBE_MENTION = re.compile(_YOUTUBE, re.IGNORECASE)
 _UNSUPPORTED_YOUTUBE = Command(Action.INVALID, _CAPABILITIES)
+_TAB_CHOICE_NEEDED = Command(
+    Action.INVALID, "선택할 유튜브 탭 목록이 없어요. 유튜브 요청을 먼저 말해 주세요.",
+)
+_AMBIGUOUS_TAB_CHOICE = Command(
+    Action.INVALID, "탭 번호와 영상 제목을 구분할 수 없어 동작을 실행하지 않았어요. 유튜브 요청을 다시 말해 주세요.",
+)
 _PREFIX = rf"(?:{_YOUTUBE}(?:에서|의|를)?\s*)?"
 _CURRENT_TARGET = re.compile(
     rf"^(?:(?:지금|현재)\s+)?(?:(?:듣고|보고)\s+(?:있는|있던)|열려\s+있는)\s+(?={_YOUTUBE}|영상)",
@@ -117,8 +123,8 @@ _SINO_DIGITS = "일이삼사오육칠팔구"
 _ORDINAL = r"([0-9]{1,4}|[가-힣]{1,4})\s*번(?:째)?"
 _SELECTION_SCOPE = re.compile(rf"^{_YOUTUBE}(?:에서|의)?(?:\s+|(?=[0-9]))", re.IGNORECASE)
 _TAB_FOLLOW_UP = re.compile(
-    rf"{_ORDINAL}(?:\s+{_ORDINAL}(?=\s+탭))?"
-    r"(?:\s+(탭)(?:을|에서|의)?)?(?:\s+(.+))?",
+    rf"{_ORDINAL}(?:\s+{_ORDINAL}(?=\s*탭))?"
+    r"(?:\s*(탭)(?:을|에서|의|으로|로)?)?(?:\s+(.+))?",
 )
 
 
@@ -161,6 +167,9 @@ def parse_command(text: str) -> Command | None:
     text = _clean(text)
     if _MEDIA_CONTEXT.search(text) and _NEGATIVE.search(text):
         return Command(Action.REJECT)
+    tab_request = _TAB_FOLLOW_UP.fullmatch(_SELECTION_SCOPE.sub("", text, count=1))
+    if tab_request and tab_request[3] and _spoken_number(tab_request[1]) is not None:
+        return _TAB_CHOICE_NEEDED
 
     korean_search = _SEARCH_QUERY.fullmatch(text)
     english_search = re.fullmatch(r"search (?:youtube|you tube) for (.+)", text, re.IGNORECASE)
@@ -248,17 +257,32 @@ def _selection_request(text, choices):
     text = _SELECTION_SCOPE.sub("", _clean(text), count=1)
     if text in _PAGE_MOVES:
         return text
+    explicit_title = re.fullmatch(rf"(.+?)\s*선택{_DO}", text)
+    name = _clean(explicit_title[1] if explicit_title else text).casefold()
+    keys = [_clean(_title(video)).casefold() for video in choices]
+    exact = [index for index, key in enumerate(keys) if name == key]
 
     def indices(number):
         return [number - 1] if 1 <= number <= len(choices) else []
 
-    pure = re.fullmatch(rf"{_ORDINAL}(?:\s*탭(?:을)?)?(?:\s*(?:선택|으로|영상))?{_DO}", text)
+    def numbered_selection(number):
+        selected = indices(number)
+        if exact and selected != exact:
+            return [], _AMBIGUOUS_TAB_CHOICE
+        return selected, None
+
+    pure = re.fullmatch(rf"{_ORDINAL}(?:\s*탭(?:을)?)?(?:\s*(?:선택|으로|로|영상))?{_DO}", text)
     if pure:
         number = _spoken_number(pure[1])
         if number is not None:
-            return indices(number), None
+            return numbered_selection(number)
     if text in {"첫째", "둘째", "셋째", "넷째"}:
-        return indices(_NUMERALS[text]), None
+        return numbered_selection(_NUMERALS[text])
+
+    if explicit_title and len(name) >= 2:
+        named = exact or [index for index, key in enumerate(keys) if name in key]
+        if named:
+            return named, None
 
     tab_request = _TAB_FOLLOW_UP.fullmatch(text)
     if tab_request:
@@ -268,24 +292,15 @@ def _selection_request(text, choices):
             if repeated and number != _spoken_number(repeated):
                 return [], Command(Action.REJECT)
             if operation is None:
-                return indices(number), None
+                return numbered_selection(number)
             command = parse_command(operation)
             if command and command.action in _PLAYER_ACTIONS:
-                return indices(number), command
-            if tab or _MEDIA_CONTEXT.search(operation):
+                return ([], _AMBIGUOUS_TAB_CHOICE) if exact else (indices(number), command)
+            if tab or (not exact and _MEDIA_CONTEXT.search(operation)):
                 return [], Command(Action.REJECT)
 
-    explicit = re.fullmatch(rf"(.+?)\s*선택{_DO}", text)
-    name = _clean(explicit[1] if explicit else text).casefold()
-    keys = [_clean(_title(video)).casefold() for video in choices]
-    exact = [index for index, key in enumerate(keys) if name == key]
-    if exact:
-        return exact, None
-    if explicit and len(name) >= 2:
-        partial = [index for index, key in enumerate(keys) if name in key]
-        if partial:
-            return partial, None
-    return None
+    return (exact, None) if exact else None
+
 
 def _saved_command(value):
     if not isinstance(value, dict):
@@ -452,6 +467,8 @@ class AsideMedia:
             _write_json(self.state_path, state)
             if override.action == Action.REJECT:
                 return _REJECTED
+            if override.action == Action.INVALID:
+                return str(override.value)
             if len(indices) != 1:
                 return "탭 번호를 확인할 수 없어요. 유튜브 요청을 다시 말해 주세요."
             command = override
@@ -494,8 +511,8 @@ class AsideMedia:
         return _prompt(choices)
 
     def _handle_locked(self, text, command, state):
-        # A scoped tab choice also mentions YouTube, so check it before the capability reply.
-        if command is None or command is _UNSUPPORTED_YOUTUBE:
+        # An ordinal tab choice needs the live prompt rather than the stateless reply.
+        if command is None or command in (_UNSUPPORTED_YOUTUBE, _TAB_CHOICE_NEEDED):
             reply = self._follow_up(text, state)
             if reply is not None or command is None:
                 return reply

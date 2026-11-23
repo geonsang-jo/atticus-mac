@@ -288,6 +288,64 @@ class MediaAdapterTests(unittest.TestCase):
                 self.assertEqual([request["op"] for request in transport.requests], ["list", "pause"])
                 self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
 
+    def test_spoken_ordinal_tab_choice_stays_local_without_a_current_prompt(self):
+        adapter, transport = self.adapter()
+        text = "첫 번째 탭으로 해 줘."
+        self.assertTrue(adapter.recognizes(text))
+        self.assertIn("유튜브 탭 목록", adapter.handle(text))
+        self.assertFalse(adapter.recognizes("1번"))
+        self.assertEqual(transport.requests, [])
+
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        adapter.handle("계속 재생해")
+        expired = json.loads(self.state.read_text())
+        expired["pending"]["expires"] = 0
+        self.state.write_text(json.dumps(expired))
+        adapter, transport = self.adapter()
+        self.assertIn("유튜브 탭 목록", adapter.handle(text))
+        self.assertEqual(transport.requests, [])
+
+    def test_spoken_ordinal_tab_choice_uses_the_active_prompt_target(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        self.assertIn("1번", adapter.handle("계속 재생해"))
+        adapter, transport = self.adapter(listed(SECOND, FIRST), changed("play", FIRST, paused=False))
+        self.assertEqual(adapter.handle("첫 번째 탭으로 해 줘."), "영상을 재생했어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_follow_up_selects_a_title_beginning_with_an_ordinal(self):
+        titled = {**SECOND, "title": "1번 영상 편집"}
+        for text, expected in (
+            ("1번 영상 편집", titled),
+            ("1번 영상 편집 선택해줘", titled),
+            ("1번 선택해 줘", FIRST),
+        ):
+            with self.subTest(text=text):
+                self.state.unlink(missing_ok=True)
+                adapter, _ = self.adapter(listed(FIRST, titled))
+                self.assertIn("2번", adapter.handle("계속 재생해"))
+                adapter, transport = self.adapter(
+                    listed(titled, FIRST), changed("play", expected, paused=False)
+                )
+                self.assertEqual(adapter.handle(text), "영상을 재생했어요.")
+                self.assertEqual(transport.requests[-1]["target"]["targetId"], expected["targetId"])
+
+    def test_follow_up_requires_disambiguation_between_title_and_tab_action(self):
+        titled = {**SECOND, "title": "1번 재생"}
+        adapter, _ = self.adapter(listed(FIRST, titled))
+        self.assertIn("2번", adapter.handle("영상 멈춰"))
+        # Provide receipts so a regression attempting the wrong action fails an assertion.
+        adapter, transport = self.adapter(listed(FIRST, titled), changed("play", FIRST, paused=False))
+        reply = adapter.handle("1번 재생")
+        self.assertIn("탭 번호와 영상 제목", reply)
+        self.assertEqual(transport.requests, [])
+        self.assertFalse(adapter.recognizes("1번"))
+
+        adapter, _ = self.adapter(listed(FIRST, titled))
+        self.assertIn("2번", adapter.handle("영상 멈춰"))
+        adapter, transport = self.adapter(listed(FIRST, titled), changed("pause", titled))
+        self.assertEqual(adapter.handle("1번 재생 선택해 줘"), "영상을 일시 정지했어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], titled["targetId"])
+
     def test_follow_up_unsafe_or_invalid_tab_command_never_reuses_pending_action(self):
         for text in (
             "첫 번 두 번째 탭 유튜브를 재생해줘",
