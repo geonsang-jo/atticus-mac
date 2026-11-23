@@ -1,4 +1,6 @@
 """Deterministic YouTube commands and verified receipts from Aside."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 import fcntl
@@ -28,6 +30,7 @@ _MAX_STATE_SIZE = 262_144
 _PAGE_MOVES = {"다음 목록": 1, "이전 목록": -1}
 _UNVERIFIED = "Aside에서 유튜브 동작을 확인할 수 없어요."
 _PLAYER_UNAVAILABLE = "유튜브 플레이어 상태를 확인할 수 없어요."
+_CAPABILITIES = "유튜브 열기와 검색, 열린 영상의 재생·정지, 소리와 시간 조절, 제목 확인을 지원해요."
 
 
 class Action(str, Enum):
@@ -93,6 +96,17 @@ _VOLUME = re.compile(
 _SEEK = re.compile(
     rf"{_PREFIX}(?:영상(?:을)?\s*)?([+\-−]?[\d가-힣.]+)\s*초\s*(앞으로|뒤로)"
     rf"(?:\s*(?:가|이동{_DO}|돌려){_PLEASE})?", re.IGNORECASE,
+)
+_UNSUPPORTED = re.compile(
+    rf"{_YOUTUBE}(?:에서|에|의|를)?\s+.+?\s*(?:재생{_DO}|틀어{_PLEASE})"
+    rf"|{_PREFIX}검색\s*결과.+?선택{_DO}"
+    rf"|{_PREFIX}(?:다음|이전)\s*(?:추천\s*)?영상(?:을|으로)?\s*"
+    rf"(?:재생{_DO}|선택{_DO}|틀어{_PLEASE}|넘겨{_PLEASE}|가{_PLEASE})?"
+    rf"|(?:{_YOUTUBE}(?:를|에서)?\s*|영상(?:을)?\s*)전체\s*화면(?:으로)?\s*"
+    rf"(?:해{_PLEASE}|켜{_PLEASE}|(?:전환|해제){_DO})?"
+    rf"|{_PREFIX}광고(?:를)?\s*건너\s*뛰어{_PLEASE}"
+    r"|play .+ on (?:youtube|you tube)|(?:next|previous) youtube video|fullscreen youtube",
+    re.IGNORECASE,
 )
 _NUMERALS = {
     "영": 0, "공": 0, "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5, "육": 6,
@@ -169,6 +183,8 @@ def parse_command(text: str) -> Command | None:
         if value is not None and 1 <= value <= _MAX_SEEK:
             return Command(Action.SEEK, value if seek[2] == "앞으로" else -value)
         return Command(Action.INVALID, f"이동할 시간을 1초에서 {_MAX_SEEK}초 사이로 말해 주세요.")
+    if _UNSUPPORTED.fullmatch(text):
+        return Command(Action.INVALID, _CAPABILITIES)
     return None
 
 

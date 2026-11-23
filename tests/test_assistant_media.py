@@ -78,7 +78,8 @@ class MediaParserTests(unittest.TestCase):
     def test_unrelated_and_underspecified_requests(self):
         parse = media_module(self).parse_command
         for text in ("테스트 실행해", "반드시 영상 멈춰야 하는 정책", "개발 세션들 지금 뭐 해?",
-                     "play some jazz", "유튜브에서 재즈 재생해", "2번", "유튜브 정책 알려줘"):
+                     "play some jazz", "2번", "유튜브 정책 알려줘",
+                     "유튜브에서 다음 영상 재생하는 법 알려줘", "전체 화면으로 해 줘"):
             with self.subTest(text=text):
                 self.assertIsNone(parse(text))
 
@@ -144,6 +145,18 @@ class MediaAdapterTests(unittest.TestCase):
     def adapter(self, *receipts):
         transport = AsideTransport(*receipts)
         return self.media.AsideMedia(transport=transport, state_path=self.state), transport
+
+    def test_unsupported_youtube_operations_reply_without_browser_actions(self):
+        adapter, transport = self.adapter()
+        for text in (
+            "유튜브에서 재즈 재생해", "유튜브 검색 결과 첫 번째 틀어 줘",
+            "유튜브에서 전체 화면으로 전환해 줘", "영상 전체 화면으로 해 줘",
+            "다음 추천 영상 선택해", "유튜브 광고 건너뛰어", "Play jazz on YouTube",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(adapter.recognizes(text))
+                self.assertIn("검색", adapter.handle(text))
+        self.assertEqual(transport.requests, [])
 
     def test_negative_command_never_calls_aside(self):
         adapter, transport = self.adapter()
@@ -242,7 +255,7 @@ class MediaAdapterTests(unittest.TestCase):
         adapter.handle("소리 꺼")
         adapter, transport = self.adapter(listed(FIRST, SECOND), changed("mute", FIRST, muted=True))
         self.assertTrue(adapter.recognizes("피아노 연주"))
-        self.assertEqual(adapter.handle("피아노 연주 선택해 줘"), "영상의 소리를 껐어요.")
+        self.assertEqual(adapter.handle("유튜브 피아노 연주 선택해 줘"), "영상의 소리를 껐어요.")
         self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
 
     def test_selection_title_with_missing_unicode_is_safe_to_store(self):
