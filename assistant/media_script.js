@@ -124,12 +124,7 @@ async function observe(page, target, op, value) {
 }
 
 async function observeConnected(target, op, value) {
-    let page;
-    try {
-        page = await getTabByTargetId(target.targetId);
-    } catch {
-        // The target is not yet attached to this REPL session.
-    }
+    let page = await getTabByTargetId(target.targetId);
     const borrowed = !page;
     if (borrowed) page = await attachBrowserTab(target.targetId);
 

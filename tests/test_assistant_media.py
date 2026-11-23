@@ -618,7 +618,10 @@ class MediaScriptTests(unittest.TestCase):
             },
         });
         const preexisting = fixture === "preexisting" ? makePage() : null;
-        const getTabByTargetId = targetId => targetId === source.targetId ? preexisting : null;
+        const getTabByTargetId = targetId => {
+            if (fixture === "lookupThrows") throw new Error("lookup unavailable");
+            return targetId === source.targetId ? preexisting : null;
+        };
         const attachBrowserTab = async () => {
             const page = makePage();
             attached.add(page);
@@ -675,6 +678,15 @@ class MediaScriptTests(unittest.TestCase):
         self.assertEqual(receipt, {"op": "list", "ok": False, "error": "cleanup"})
         self.assertEqual(details["attached"], 1)
         self.assertEqual(details["closed"], ["borrowed"])
+
+    def test_static_script_does_not_claim_ownership_after_a_failed_lookup(self):
+        for op in ("list", "pause"):
+            with self.subTest(op=op):
+                receipt, details = self.run_script("lookupThrows", op)
+                self.assertEqual(details["attached"], 0)
+                self.assertEqual(details["closed"], [])
+                if op == "pause":
+                    self.assertEqual(receipt.get("error"), "browser")
 
     def test_static_script_reuses_a_preexisting_session_page_without_detaching(self):
         for op in ("list", "pause"):
