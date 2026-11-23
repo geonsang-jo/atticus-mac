@@ -14,7 +14,7 @@ class ChatTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        self.prefs = {'saveChats': True, 'screen': 'never', 'learn': False, 'routing': 'cheapest'}
+        self.prefs = {'assistantMode': False, 'saveChats': True, 'screen': 'never', 'learn': False, 'routing': 'cheapest'}
         p = patch.multiple(atticus, DIR=tmp.name, HOME=tmp.name, RECENT=str(self.root/'recent.jsonl'),
                            PREFS=str(self.root/'settings.json'), WORKED=str(self.root/'worked.json'),
                            pref=lambda k,d:self.prefs.get(k,d))

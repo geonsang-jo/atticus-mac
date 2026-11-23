@@ -101,7 +101,7 @@ class OpenNamedThingTests(unittest.TestCase):
             def join(self, *a): pass
         with patch.object(atticus.threading, 'Thread', NoThread), patch('sys.argv', ['atticus.py', 'open mathsite, my homework site in chrome']), \
              patch.dict(os.environ, {'ATTICUS_ASK': str(self.root), 'ATTICUS_FRONT': 'Fixture'}), \
-             patch.multiple(atticus, pref=lambda k, d: prefs.get(k, d), licensed=lambda: True, ping=lambda: None, fast=lambda _: None,
+             patch.multiple(atticus, pref=lambda k, d: False if k == 'assistantMode' else prefs.get(k, d), licensed=lambda: True, ping=lambda: None, fast=lambda _: None,
                             front=lambda: ('Fixture', 'Scratch'), osa=lambda *a: '', screens=lambda: [], describe=lambda *a: 'Scratch display',
                             selection_context=lambda: '', screen_for=lambda *a: None, tool_help=lambda *a, **k: '', run=brain,
                             start_ai=lambda *a, **k: None, wait_commit=lambda: True, restore_focus=lambda *a: None, say=Mock(),

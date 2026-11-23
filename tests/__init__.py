@@ -17,13 +17,13 @@ os.environ['ATTICUS_POSTHOG_KEY'] = ''   # tests that clear os.environ also drop
 atexit.register(config.cleanup)
 
 
-def scratch_dir(test):
-    """A temp atticus.DIR with default prefs for one test, undone at cleanup; returns the folder."""
+def scratch_dir(test, *, assistant_mode=False):
+    """Scratch config for upstream features; voice-assistant cases opt in explicitly."""
     from pathlib import Path
     from unittest.mock import patch
     import atticus
     root = tempfile.TemporaryDirectory(); test.addCleanup(root.cleanup)
-    for p in (patch.object(atticus, 'DIR', root.name), patch.object(atticus, 'pref', side_effect=lambda k, d: d)):
+    for p in (patch.object(atticus, 'DIR', root.name), patch.object(atticus, 'pref', side_effect=lambda k, d: assistant_mode if k == 'assistantMode' else d)):
         p.start(); test.addCleanup(p.stop)
     return Path(root.name)
 
