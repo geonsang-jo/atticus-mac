@@ -623,16 +623,16 @@ class MediaScriptTests(unittest.TestCase):
         const closed = [];
         const opened = [];
         const shortsPage = new URL(original).pathname.startsWith("/shorts/");
-        const player = {getVideoData: () => ({
-            video_id: (
-                ["missingID", "domID"].includes(fixture) || (fixture === "losesID" && calls)
-            ) ? undefined : (
-                new URL(location.href).searchParams.get("v") ?? new URL(location.href).pathname.split("/").at(-1)
-            )
-        })};
+        const unmarkedShort = fixture.startsWith("unmarkedShort");
+        const player = {getVideoData: () => {
+            if (["missingID", "domID"].includes(fixture) || (fixture === "losesID" && calls)) return {};
+            if (fixture === "unmarkedShortWrongId") return {video_id: "AAAAAAAAAAA"};
+            const url = new URL(location.href);
+            return {video_id: url.searchParams.get("v") ?? url.pathname.split("/").at(-1)};
+        }};
         const video = {
-            paused: false, muted: false, volume: 0.5, duration: 200,
-            readyState: 2, seeking: false,
+            paused: unmarkedShort, muted: false, volume: 0.5, duration: 200,
+            readyState: unmarkedShort ? 4 : 2, seeking: false,
             get currentTime() { return currentTime; },
             set currentTime(value) {
                 this.seeking = true;
@@ -646,15 +646,17 @@ class MediaScriptTests(unittest.TestCase):
                 });
             },
             removeEventListener() {},
-            getBoundingClientRect: () => ({width: 1132, height: 637}),
+            getBoundingClientRect: () => unmarkedShort ? {width: 399, height: 709} : {width: 1132, height: 637},
             closest: (selector) => {
                 if (selector === ".html5-video-player") return player;
                 if (selector === "#movie_player" && !shortsPage) return player;
+                if (selector === "#shorts-player" && shortsPage) return player;
                 if (selector === "ytd-watch-flexy, ytm-watch" && !shortsPage) return {};
                 if (fixture === "domID" && selector.includes("[video-id]"))
                     return {getAttribute: () => source.videoId};
-                if (shortsPage && selector.startsWith("ytd-reel-video-renderer"))
-                    return {hasAttribute: () => true};
+                if (shortsPage && (selector === "ytd-reel-video-renderer" ||
+                    (!unmarkedShort && selector === "ytd-reel-video-renderer[is-active]")))
+                    return {getAttribute: () => null};
                 return null;
             },
             pause: () => {
@@ -662,6 +664,10 @@ class MediaScriptTests(unittest.TestCase):
                 if (["changesAfter", "cleanupFailsAfterChange"].includes(fixture))
                     location.href = replacement;
                 video.paused = true;
+            },
+            play: async () => {
+                calls++;
+                video.paused = false;
             },
         };
         function extraVideo(id, videoId, width, inReel = false) {
@@ -686,6 +692,12 @@ class MediaScriptTests(unittest.TestCase):
         }
         if (fixture === "twoMainPlayers") videos.push(extraVideo("movie_player", source.videoId, 400));
         if (fixture === "hiddenShort") videos.push(extraVideo("shorts-player", "AAAAAAAAAAA", 0, true));
+        if (unmarkedShort) {
+            videos.push({...extraVideo("movie_player", "AAAAAAAAAAA", 0), readyState: 0});
+            videos.push(extraVideo("inline-preview-player", source.videoId, 0));
+        }
+        if (fixture === "unmarkedShortTwoVisible")
+            videos.push(extraVideo("shorts-player", source.videoId, 399, true));
         globalThis.document = {
             title: "Fixture - YouTube",
             querySelector: () => null,
@@ -835,6 +847,26 @@ class MediaScriptTests(unittest.TestCase):
         self.assertTrue(receipt["ok"])
         self.assertEqual(receipt["after"]["videoId"], SECOND["videoId"])
         self.assertEqual(details["calls"], 1)
+
+    def test_static_script_reads_and_plays_visible_short_with_no_reel_markers(self):
+        status, details = self.run_script("unmarkedShort", "list", source=SECOND)
+        self.assertTrue(status["videos"][0].get("paused"))
+        self.assertEqual(details["calls"], 0)
+
+        receipt, details = self.run_script("unmarkedShort", "play", source=SECOND)
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["before"]["videoId"], SECOND["videoId"])
+        self.assertTrue(receipt["before"]["paused"])
+        self.assertFalse(receipt["after"]["paused"])
+        self.assertEqual(details["calls"], 1)
+
+    def test_static_script_rejects_two_visible_shorts_or_mismatched_player_id(self):
+        for fixture, error in (("unmarkedShortTwoVisible", "unloaded"), ("unmarkedShortWrongId", "changed")):
+            with self.subTest(fixture=fixture):
+                receipt, details = self.run_script(fixture, "play", source=SECOND)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["error"], error)
+                self.assertEqual(details["calls"], 0)
 
     def test_static_script_does_not_touch_wrong_video_or_unloaded_player(self):
         for fixture, error in [("changesBefore", "changed"), ("noPlayer", "unloaded")]:

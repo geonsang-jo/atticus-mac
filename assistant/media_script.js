@@ -35,7 +35,9 @@ async function observe(page, target, op, value) {
                 const {width, height} = video.getBoundingClientRect();
                 if (!width || !height || video.closest("#inline-preview-player") ||
                     video.checkVisibility?.({visibilityProperty: true}) === false) return false;
-                if (shortsPage) return video.closest("ytd-reel-video-renderer[is-active]");
+                if (shortsPage) {
+                    return video.closest("#shorts-player") && video.closest("ytd-reel-video-renderer");
+                }
                 return video.closest("#movie_player") &&
                     (embedPage || video.closest("ytd-watch-flexy, ytm-watch"));
             });
