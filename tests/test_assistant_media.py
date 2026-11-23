@@ -63,6 +63,20 @@ class MediaParserTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assert_command(text, action)
 
+    def test_playback_state_transition_phrasing(self):
+        for text, action in (
+            ("재생으로 바꿔 줘", "play"),
+            ("유튜브를 재생으로 바꿔 줘", "play"),
+            ("유튜브 재생으로 바꿔줘", "play"),
+            ("지금 듣고 있는 YouTube를 재생 상태로 전환해 주세요", "play"),
+            ("영상을 재생 모드로 바꿔 줘요", "play"),
+            ("일시정지로 바꿔 줘", "pause"),
+            ("유튜브 영상 일시 정지 상태로 전환해 주세요", "pause"),
+            ("보고 있던 영상을 정지 모드로 바꿔주세요", "pause"),
+        ):
+            with self.subTest(text=text):
+                self.assert_command(text, action)
+
     def test_numeric_bounds_signed_direction_and_spoken_numbers(self):
         self.assert_command("볼륨 ３０퍼센트로 해.", "volume", 30)
         self.assert_command("볼륨을 삼십 퍼센트로 설정해줘", "volume", 30)
@@ -175,6 +189,26 @@ class MediaAdapterTests(unittest.TestCase):
         adapter, transport = self.adapter()
         self.assertIn("실행하지", adapter.handle("지금 듣고 있는 YouTube 다시 틀지 마."))
         self.assertIn("검색", adapter.handle("지금 듣고 있는 YouTube 다음 영상으로 넘어가 줘."))
+        self.assertEqual(transport.requests, [])
+
+    def test_playback_state_transition_resumes_a_verified_target(self):
+        adapter, transport = self.adapter(listed(FIRST), changed("play", FIRST, paused=False))
+        self.assertEqual(adapter.handle("유튜브를 재생으로 바꿔 줘"), "영상을 재생했어요.")
+        self.assertEqual([request["op"] for request in transport.requests], ["list", "play"])
+
+    def test_playback_state_transition_refusals_never_call_aside(self):
+        adapter, transport = self.adapter()
+        for text in (
+            "유튜브를 재생으로 바꾸지 마",
+            "지금 듣고 있는 YouTube 재생 모드로 전환하지 마",
+            "정지 상태로 바꾸지 마",
+            "재생으로 안 바꿔도 돼",
+        ):
+            with self.subTest(text=text):
+                reply = adapter.handle(text)
+                self.assertIsNotNone(reply, text)
+                self.assertIn("실행하지", reply)
+        self.assertIn("검색", adapter.handle("유튜브를 전체 화면 모드로 전환해 줘"))
         self.assertEqual(transport.requests, [])
 
     def test_negative_command_never_calls_aside(self):

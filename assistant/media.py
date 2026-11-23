@@ -65,16 +65,18 @@ _CURRENT_TARGET = re.compile(
     rf"^(?:(?:지금|현재)\s+)?(?:(?:듣고|보고)\s+(?:있는|있던)|열려\s+있는)\s+(?={_YOUTUBE}|영상)",
     re.IGNORECASE,
 )
-_PLEASE = r"(?:\s*(?:줘|주세요|주십시오))?"
+_PLEASE = r"(?:\s*(?:줘요?|주세요|주십시오))?"
 _DO = rf"(?:\s*(?:해|하세요|해요){_PLEASE})?"
 _OPEN = rf"(?:열어{_PLEASE}|열기|켜{_PLEASE})"
 _SEARCH = rf"검색(?:\s*만)?(?:을)?{_DO}"
+_STATE_CHANGE = rf"(?:\s*(?:상태|모드))?\s*(?:으로|로)\s*(?:바꿔{_PLEASE}|전환{_DO})"
 _TEXT_ACTIONS = (
     (Action.OPEN, rf"{_YOUTUBE}(?:를)?\s*{_OPEN}|open (?:youtube|you tube)"),
-    (Action.PAUSE, rf"{_PREFIX}(?:영상(?:을)?\s*)?(?:멈춰{_PLEASE}|일시\s*정지{_DO})"
+    (Action.PAUSE, rf"{_PREFIX}(?:영상(?:을)?\s*)?"
+                   rf"(?:멈춰{_PLEASE}|일시\s*정지{_DO}|(?:일시\s*)?정지{_STATE_CHANGE})"
                    r"|pause (?:youtube|the video)"),
     (Action.PLAY, rf"{_PREFIX}(?:영상(?:을)?\s*)?(?:계속\s*|다시\s*)?"
-                  rf"(?:재생{_DO}|틀어{_PLEASE}|재개{_DO})"
+                  rf"(?:재생(?:{_DO}|{_STATE_CHANGE})|틀어{_PLEASE}|재개{_DO})"
                   r"|(?:play|resume) (?:youtube|the video)"),
     (Action.MUTE, rf"{_PREFIX}(?:영상(?:의)?\s*)?(?:소리(?:를)?\s*꺼{_PLEASE}|음소거{_DO})"
                   r"|mute (?:youtube|the video)"),
@@ -86,12 +88,12 @@ _TEXT_ACTIONS = (
                     r"|what(?:'s| is) playing on youtube"),
 )
 _MEDIA_CONTEXT = re.compile(
-    rf"{_YOUTUBE}|영상|재생|일시\s*정지|멈추|볼륨|음량|소리|음소거|"
+    rf"{_YOUTUBE}|영상|재생|일시\s*정지|정지\s*(?:상태|모드|으로|로)|멈추|볼륨|음량|소리|음소거|"
     r"\d+\s*초|\b(?:pause|resume|mute|volume|seek)\b", re.IGNORECASE,
 )
 _NEGATIVE = re.compile(
-    r"(?:하지|열지|켜지|끄지|틀지|멈추지|가지|올리지|내리지)\s*말?"
-    r"(?:마|말|아|아요|아줘)|\b(?:안|못)\s*(?:해|열어|틀어|멈춰|꺼|켜)"
+    r"(?:하지|열지|켜지|끄지|틀지|멈추지|가지|올리지|내리지|바꾸지)\s*말?"
+    r"(?:마|말|아|아요|아줘)|\b(?:안|못)\s*(?:해|열어|틀어|멈춰|꺼|켜|바꿔|전환)"
     r"|\b(?:do not|don't|never)\b", re.IGNORECASE,
 )
 _SEARCH_QUERY = re.compile(rf"{_YOUTUBE}(?:에서|에)\s+(.+?)\s*{_SEARCH}", re.IGNORECASE)
