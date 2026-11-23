@@ -18,12 +18,13 @@ class SwiftReviewFixTests(unittest.TestCase):
         self.overlay = (ROOT / "ui/ui.html").read_text()
         self.settings = (ROOT / "ui/settings.html").read_text()
 
-    def test_hands_free_follow_up_keeps_answer_until_words(self):
+    def test_hands_free_answers_rearm_only_the_wake_recognizer(self):
         wake = self.swift.split('    func wakeTick()', 1)[1].split('    func enableWakeWord(settings: Bool = false)', 1)[0]
-        self.assertIn('clickMicrophone(quiet: true)', wake)
+        self.assertNotIn('clickMicrophone(quiet: true)', wake)
+        self.assertEqual(wake.count('clickMicrophone()'), 1)
         self.assertIn('guard Date() >= wakeRetry else { return }', wake)   # a backoff once pushed the retry back every tick, forever
-        self.assertIn('("sound", cueSound?.isPlaying == true || Date() < cueEnds)', wake)
-        self.assertIn('("speaking", voice?.isRunning == true || drawing.voice?.isRunning == true)', wake)
+        self.assertIn('cueSound?.isPlaying == true || Date() < cueEnds', self.swift)
+        self.assertIn('voice?.isRunning == true || drawing.voice?.isRunning == true', self.swift)
         self.assertIn('s?.duration ?? 0', self.swift)
         self.assertIn('if !self.quietFollowUp, let selection = self.selection', self.swift)
         start = self.swift.split('    func start(dictate: Bool, quiet: Bool = false)', 1)[1].split('    func heard(', 1)[0]
@@ -311,7 +312,7 @@ struct NSWorkspace {
     static let sessionDidResignActiveNotification = "lock", sessionDidBecomeActiveNotification = "unlock"
 }
 final class State {
-    var wakeSleeping = false, wakeInactive = false
+    var wakeSleeping = false, wakeInactive = false, wakeLocked = false
     var wakeSuspended: Bool ''' + state + '''
 }
 let app = State()

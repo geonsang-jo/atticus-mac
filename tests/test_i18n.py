@@ -63,40 +63,32 @@ console.log('translation engine passed');
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('translation engine passed', result.stdout)
 
-    def test_automatic_speech_stays_english_and_wake_word_is_unchanged(self):
+    def test_wake_and_request_languages_are_independent_of_ui(self):
         swift = (ROOT / 'Atticus.swift').read_text()
-        helper = swift[swift.index('func supportedSpeechLocale('):swift.index('\nfunc applySharing')]
-        self.assertIn('language: String = Prefs.str("uiLanguage") == "auto" ? "en" : Prefs.uiLanguage', helper)
-        prepare = swift[swift.index('    func prepareSpeech()'):swift.index('    var text =')]
-        self.assertIn('let choice = Prefs.str("uiLanguage")', prepare)
-        self.assertIn('let language = choice == "auto" ? "en" : Prefs.uiLanguage', prepare)
-        self.assertIn('supportedSpeechLocale(locales, language: language)', prepare)
-        self.assertIn('if choice != Prefs.str("uiLanguage")', prepare)
-        self.assertEqual(swift.count('SFSpeechRecognizer(locale: Locale(identifier: "en-US"))'), 2)
+        wake = swift.split('    func wakeTick()', 1)[1].split('    func enableWakeWord(', 1)[0]
+        prepare = swift.split('    func prepareSpeech()', 1)[1].split('    var text =', 1)[0]
+        self.assertIn('Prefs.str("wakeLanguage")', wake)
+        self.assertIn('Prefs.str("speechLanguage")', prepare)
+        self.assertNotIn('uiLanguage', wake + prepare)
+        self.assertIn('guard locales.contains(locale) else', prepare)
+        self.assertIn('recognizer.locale.identifier(.bcp47) == locale.identifier(.bcp47)', wake)
 
-    def test_speech_uses_exact_engine_locale_or_english(self):
+    def test_speech_uses_exact_engine_locale_or_reports_unavailable(self):
         swift = (ROOT / 'Atticus.swift').read_text()
         helper = swift[swift.index('func supportedSpeechLocale('):swift.index('\nfunc applySharing')]
         resolver = swift[swift.index('    static func resolveUILanguage('):swift.index('    static func num(')]
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         source = Path(temp.name) / 'locales.swift'
-        source.write_text('import Foundation\nenum Prefs { static var uiLanguage = "en"; static var choice = "auto"; static func str(_ key: String) -> String { choice }\n' + resolver + '}\n' + helper + '''
-for code in ["it", "es", "fr", "de"] {
-    let exact = Locale(identifier: code + "-CH")
-    Prefs.uiLanguage = code; Prefs.choice = "auto"
-    precondition(supportedSpeechLocale([exact]).identifier == "en-US")
-    Prefs.choice = code
-    precondition(supportedSpeechLocale([exact]) == exact)
-    precondition(supportedSpeechLocale([]).identifier == "en-US")
-    precondition(supportedSpeechLocale([Locale(identifier:"en-US"), exact], language:code) == exact)
-    precondition(supportedSpeechLocale([Locale(identifier:"en-US")], language:code).identifier == "en-US")
-    precondition(Prefs.resolveUILanguage(code + "-CH") == code)
-}
-precondition(supportedSpeechLocale([Locale(identifier:"en-GB")], language:"en").identifier == "en-US")
-precondition(supportedSpeechLocale([], language:"it").identifier == "en-US")
+        source.write_text('import Foundation\nenum Prefs { static func str(_ k: String) -> String { "ko-KR" }\n' + resolver + '}\n' + helper + """
+let ko = Locale(identifier: "ko_KR"), en = Locale(identifier: "en_US")
+precondition(supportedSpeechLocale([en, ko]) == ko)
+precondition(supportedSpeechLocale([ko, en], language:"en-US") == en)
+let unsupported = supportedSpeechLocale([en])
+precondition(unsupported.identifier(.bcp47) == "ko-KR" && ![en].contains(unsupported))
+for code in ["it", "es", "fr", "de"] { precondition(Prefs.resolveUILanguage(code + "-CH") == code) }
 precondition(Prefs.resolveUILanguage("zh-Hans") == "en")
 print("locale selection passed")
-''')
+""")
         result = subprocess.run(['swift', str(source)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('locale selection passed', result.stdout)

@@ -230,7 +230,7 @@ typealias NSWindow = Setup
 var launches=0
 func relaunchSoon(){launches += 1}
 final class Setup {
- var screenGrantedDuringSetup=false,win:Setup?,closed=false,hidden=false
+ var screenGrantedDuringSetup=false,win:Setup?,closed=false,hidden=false,wakeTrial=false
  func close(){closed=true}   // what quitting does too: no windowShouldClose
  func performClose(){if windowShouldClose(self){close()}}   // his red button or Close Setup
  func orderOut(_ s:Any?){hidden=true}

@@ -36,9 +36,10 @@ class OnboardingMatchesAppTests(unittest.TestCase):
         self.assertIn("post({ do: 'set', k: 'improve', v: String(value) })", self.page)
         self.assertIn('"dictateHotkeyLabel": Prefs.str("dictateHotkeyLabel")', (ROOT / 'Atticus.swift').read_text())
         handler = (ROOT / 'Atticus.swift').read_text().split('if b["do"] == "set" {', 1)[1].split('            return\n        }', 1)[0]
-        self.assertIn('if b["k"] == "improve" { Atticus.settings.apply("improve", b["v"] == "true")', handler)   # setup sets only failure reports and the work model
+        self.assertIn('if b["k"] == "improve" { Atticus.settings.apply("improve", b["v"] == "true")', handler)
         self.assertIn('if b["k"] == "model", let v = b["v"], ["sonnet", "opus"].contains(v) { Atticus.settings.apply("model", v)', handler)
-        self.assertEqual(handler.count('Atticus.settings.apply('), 2)
+        self.assertIn('Atticus.settings.apply("microphone", uid)', handler)
+        self.assertEqual(handler.count('Atticus.settings.apply('), 3)
 
     def test_welcome_uses_original_shortcut_gesture_and_only_system_events_is_asked_in_setup(self):
         self.assertIn('id="welcome-talk">Hold the shortcut, speak, release to send.', self.page)
@@ -207,7 +208,7 @@ for (const [label, keys] of Object.entries(want)) if (JSON.stringify(capsOf(labe
         self.assertIn('if line == "! setup" { onboarding.open(automatic: true); continue }', swift)
         self.assertIn('case "setup": onboarding.open()', swift)   # explicit setup stays available after dismissal
         self.assertIn('if !UserDefaults.standard.bool(forKey: "onboarded") || UserDefaults.standard.string(forKey: "setupPage") != nil { DispatchQueue.main.async { onboarding.open() } }', swift)
-        self.assertIn('else { Onboarding.plan { c in if c["ok"] as? Bool != true { onboarding.open(automatic: true) } } }', swift)
+        self.assertIn('else if !Prefs.bool("assistantMode") { Onboarding.plan { c in if c["ok"] as? Bool != true { onboarding.open(automatic: true) } } }', swift)
         self.assertIn('UserDefaults.standard.string(forKey: "setupPage") ?? (automatic ? "ai" : nil)', swift.split('    func open(automatic: Bool = false) {', 1)[1].split('loadPage(v', 1)[0])   # the page he was on, else a sign-in problem opens at the AI step
 
     @unittest.skipUnless(shutil.which('node'), 'node runs the start page choice')

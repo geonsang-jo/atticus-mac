@@ -344,7 +344,7 @@
 
 <section class="page" id="perms">
   <h2 class="r">Set up Mac access</h2>
-  <p class="sub r">Allow Atticus to hear you, see your screen and control your Mac.</p>
+  <p class="sub r" id="access-description">Allow Atticus to hear you, see your screen and control your Mac.</p>
   <div class="list r" id="list"></div>
   <div class="note r" id="perms-note">Still says Allow after you switched it on? Click Allow again.</div>
   <div id="perms-done" class="r">Mac access is ready.</div>
@@ -353,14 +353,15 @@
 
 <section class="page" id="try">
   <h2 class="r">Now try it</h2>
-  <p class="sub r" id="try-talk">Hold the keys, say what you want, then let go.</p>
+  <p class="sub r" id="try-talk">“헤이 아티”라고 부른 뒤, 안내음이 끝나면 요청을 말하세요.</p>
   <div id="block" hidden><span id="block-text"></span><button class="allow" id="block-fix"></button></div>
   <div class="stage r idle" id="live" aria-live="polite">
     <div class="keys" id="trykeys"><div class="key">⌃</div><div class="key">⌥</div><div class="key wide">Space</div></div>
     <div id="live-title">Ready</div>
     <div id="live-said"></div>
   </div>
-  <div class="says r"><span>Try</span><i>“Hey Atticus, what’s up?”</i></div>
+  <div class="says r"><label>마이크 <select id="wake-mic"><option value="automatic">자동 선택</option></select></label></div>
+  <p class="note" id="wake-status" role="status">호출어 상태 확인 중</p>
 </section>
 
 <section class="page" id="dictate">
@@ -483,10 +484,10 @@
   const post = m => window.webkit?.messageHandlers.ob.postMessage(m);
   const pages = ['welcome', 'ai', 'model', 'perms', 'try', 'dictate', 'show', 'improve', 'tip', 'done'];
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-  let practice = null;
+  let practice = null, builtin = false;
   let cur = '', orbWake = null, ahead = 0, arrivedReady = false, askedLocal = false, ideaTimer = 0, ideaAt = 0;
   let planOK = false, planKnown = false, last = null, toggleMode = false, talkLabel = '⌃⌥Space', tried = false, doneNext = 'Start Using Atticus';
-  const ready = id => id === 'perms' ? !!last && P.every(([k]) => last[k]) : id === 'ai' ? planOK : false;
+  const ready = id => id === 'perms' ? !!last && (builtin ? last.mic && last.speech : P.every(([k]) => last[k])) : id === 'ai' ? planOK : false;
   // The work model step: only where Settings shows its Work model row, and once the Claude plan works.
   let workModel = 'sonnet', routing = 'balanced';
   const modelFits = () => provider === 'claude' && !saved.apiBase && routing !== 'cheapest';
@@ -524,12 +525,13 @@
     if (arrivedReady || ahead || !still()) return;
     ahead = setTimeout(() => { ahead = 0; if (still()) go(step(1)); }, ms);
   };
-  $('start').onclick = () => go('ai');
+  $('start').onclick = () => go(builtin ? 'perms' : 'ai');
   $('skip').onclick = () => ['improve', 'tip', 'done'].includes(cur) ? post({ do: 'done' }) : go('improve');   // skips the setup steps only: improve, tip and done still show, and done says what is missing
   $('back').onclick = () => go(step(-1));
   $('later').onclick = () => improve(false);
   $('next').onclick = () => cur === 'done' ? post({ do: 'done' }) : cur === 'improve' ? improve(true) : go(step(1));
   $('dots').innerHTML = pages.map(id => `<button data-to="${id}" aria-label="${$(id).querySelector('h1,h2')?.textContent || id}"></button>`).join('');
+  $('wake-mic').onchange = e => post({do: 'set', k: 'microphone', v: e.target.value});
   $('dictate-field').onfocus = () => post({ do: 'dictationFocus', v: 'true' });
   $('dictate-field').onblur = () => { practice = null; post({ do: 'dictationFocus', v: 'false' }); };
   $('dictate-field').onkeydown = e => { if (e.key === 'Escape') practice = null; };
@@ -560,7 +562,7 @@
     $('next').classList.toggle('quiet', !done);
     $('perms-done').classList.toggle('on', ready('perms'));
     $('perms-note').hidden = ready('perms');
-    const rows = [...$('list').children], next = rows.find(r => !r.classList.contains('ok'));
+    const rows = [...$('list').children], next = rows.find(r => !r.classList.contains('ok') && (!builtin || ['p-mic', 'p-speech'].includes(r.id)));
     rows.forEach(r => r.classList.toggle('next', r === next));
     paintBlock(); paintModel();
   };
@@ -568,8 +570,8 @@
   // Permissions: icon color + glyph, why it's needed.
   const P = [
     ['ax', 'Accessibility', 'Moves windows and clicks buttons for you.', 'rgb(var(--blue-rgb))', '<circle cx="12" cy="4.5" r="1.6"/><path d="M5 8.5l7 1.5 7-1.5M12 10v4.5M12 14.5l-3 6M12 14.5l3 6"/>'],
-    ['mic', 'Microphone', 'Hears you while you hold the shortcut.', 'rgb(var(--orange-rgb))', '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>'],
-    ['speech', 'Speech Recognition', 'Turns your words into text.', 'rgb(var(--gray-56-rgb))', '<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'],
+    ['mic', 'Microphone', '이 Mac에서 호출어와 요청을 듣습니다.', 'rgb(var(--orange-rgb))', '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>'],
+    ['speech', 'Speech Recognition', '선택한 언어로 호출어와 요청을 인식합니다.', 'rgb(var(--gray-56-rgb))', '<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'],
     ['screen', 'Screen & System Audio Recording', 'Lets Atticus see your screen.', 'rgb(var(--purple-rgb))', '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'],
     ['auto', 'System Events', 'Controls your apps for you.', 'rgb(var(--gray-39-rgb))', '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>'],
   ];
@@ -643,7 +645,12 @@
 
   // Try it: what stops a first ask, with the one click that fixes it.
   const paintBlock = () => {
-    const s = last || {}, b = !planOK ? ['Atticus needs an AI before it can answer.', 'Pick One', () => go('ai')]
+    const s = last || {};
+    let b;
+    if (builtin) {
+      if (!s.mic) b = ['마이크 접근을 허용하세요.', '허용', 'mic'];
+      else if (!s.speech) b = ['음성 인식을 허용하세요.', '허용', 'speech'];
+    } else b = !planOK ? ['Atticus needs an AI before it can answer.', 'Pick One', () => go('ai')]
       : !s.ax ? ['Atticus can’t click or type for you yet.', 'Allow', 'ax'] : null;
     $('block').hidden = !b || !last;
     if (!b) return;
@@ -668,6 +675,13 @@
   };
 
   const paintDone = s => {
+    if (builtin) {
+      const missing = [!s.mic && '마이크', !s.speech && '음성 인식'].filter(Boolean);
+      $('done-title').textContent = missing.length ? '음성 권한이 필요합니다' : '음성 권한 설정 완료';
+      $('done-status').className = missing.length ? 'warn' : '';
+      $('done-sub').textContent = missing.length ? missing.join(' · ') + ' 권한을 허용하세요.' : '호출어를 말하고 안내음이 끝나면 요청하세요.';
+      doneNext = '시작하기'; return;
+    }
     const core = [['claude', 'AI provider'], ['ax', 'Accessibility'], ['mic', 'Microphone'], ['speech', 'Speech Recognition'], ['screen', 'Screen & System Audio Recording'], ['auto', 'System Events']], missing = core.filter(([id]) => !s[id]).map(([, name]) => name), voice = !!s.claude;
     $('done-title').textContent = !missing.length ? 'You’re all set' : voice ? 'AI is ready' : 'Setup isn’t finished yet'; $('done-status').className = missing.length ? 'warn' : '';
     $('done-sub').textContent = !missing.length ? (toggleMode ? 'Press' : 'Hold') + ' the shortcut anywhere.' : 'Still needed: ' + missing.join(', ') + '.';
@@ -695,7 +709,7 @@
       if (toggle === toggleMode) return;
       toggleMode = toggle;
       $('welcome-talk').textContent = toggle ? 'Press the shortcut, speak, press again to send.' : 'Hold the shortcut, speak, release to send.';
-      $('try-talk').textContent = toggle ? 'Press the shortcut, say what you want, then press it again.' : 'Hold the keys, say what you want, then let go.';
+
       live(liveState); if (last) ob.set(last);
     },
     keys(held) {   // the modifiers held now ("⌃⌥", "fn"…), many times a second
@@ -752,7 +766,22 @@
       };
     },
     server(s) { saved = { apiBase: s.apiBase || '', apiModel: s.apiModel || '' }; },
+    wake(w) {
+      $('try-talk').textContent = '“' + w.phrase + '”라고 부른 뒤, 안내음이 끝나면 “지금 뭐 틀어져 있어?”라고 말하세요.';
+      $('wake-status').textContent = w.status;
+      const mic = $('wake-mic'), list = JSON.stringify(w.mics);
+      if (mic.dataset.list !== list) {
+        mic.replaceChildren(new Option('자동 선택', 'automatic'), ...w.mics.map(m => new Option(m.name, m.uid)));
+        mic.dataset.list = list;
+      }
+      mic.value = [...mic.options].some(o => o.value === w.selected) ? w.selected : 'automatic';
+    },
     prefs(p) {
+      if ('assistantMode' in p && builtin !== p.assistantMode) {
+        builtin = p.assistantMode;
+        if (builtin) $('access-description').textContent = '호출어와 음성 요청에 사용할 마이크와 음성 인식 권한을 허용하세요.';
+        paint();
+      }
       if ('routing' in p) routing = p.routing;
       if ('model' in p) workModel = p.model === 'opus' || p.model === 'haiku' && p.agentModel === 'opus' ? 'opus' : 'sonnet';   // as Settings shows it
       paintModel();
