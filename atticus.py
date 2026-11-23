@@ -9326,6 +9326,10 @@ def main():
         if not wait_commit(): return warm and stop_claude(warm)
         if warm: stop_claude(warm)
         return say('✓', assistant_commands.handle(task))
+    if '--plan' not in args and pref('assistantMode', True):
+        if not wait_commit(): return warm and stop_claude(warm)
+        if warm: stop_claude(warm)
+        return say('✓', '요청을 이해하지 못해 실행하지 않았어요. “유튜브 재생해 줘” 또는 “세션 상태 알려줘”처럼 다시 말해 주세요.')
     marked, marked_images = point_context(marks)
     for path, _ in marked_images:
         atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))
