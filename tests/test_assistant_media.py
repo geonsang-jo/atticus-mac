@@ -1,0 +1,379 @@
+"""Exercise media commands with local fixtures and an injected Aside transport."""
+import importlib
+import json
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import tempfile
+import unittest
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "assistant/media_script.js"
+
+
+def media_module(test):
+    try:
+        return importlib.import_module("assistant.media")
+    except ModuleNotFoundError as error:
+        if error.name not in {"assistant", "assistant.media"}:
+            raise
+        test.fail("The Korean media adapter has not been implemented")
+
+
+class MediaParserTests(unittest.TestCase):
+    def assert_command(self, text, action, value=None):
+        command = media_module(self).parse_command(text)
+        self.assertIsNotNone(command, text)
+        self.assertEqual((command.action.value, command.value), (action, value), text)
+
+    def test_open_and_search_only(self):
+        self.assert_command("유튜브 열어 주세요.", "open")
+        self.assert_command("유튜브에서 재즈 검색해.", "search", "재즈")
+        self.assert_command("유튜브에서 재즈 검색만 해줘.", "search", "재즈")
+        self.assert_command("YouTube에서 Studio Ghibli를 검색해줘", "search", "Studio Ghibli")
+        self.assert_command("Search YouTube for keyboard music", "search", "keyboard music")
+
+    def test_search_preserves_a_noun_with_a_particle_like_ending(self):
+        self.assert_command("유튜브에서 노을 검색해", "search", "노을")
+        self.assert_command("유튜브에서 서울 검색해", "search", "서울")
+
+    def test_explicit_playback_and_status(self):
+        for text, action in [
+            ("영상 멈춰", "pause"),
+            ("유튜브 일시 정지해 줘.", "pause"),
+            ("계속 재생해.", "play"),
+            ("유튜브 영상 다시 틀어줘", "play"),
+            ("소리 꺼", "mute"),
+            ("유튜브 소리 다시 켜 줘", "unmute"),
+            ("지금 뭐 틀어져 있어?", "status"),
+            ("유튜브 영상 제목 알려줘", "status"),
+            ("pause YouTube", "pause"),
+        ]:
+            with self.subTest(text=text):
+                self.assert_command(text, action)
+
+    def test_numeric_bounds_signed_direction_and_spoken_numbers(self):
+        self.assert_command("볼륨 ３０퍼센트로 해.", "volume", 30)
+        self.assert_command("볼륨을 삼십 퍼센트로 설정해줘", "volume", 30)
+        self.assert_command("유튜브 볼륨 백 프로로 해줘", "volume", 100)
+        self.assert_command("볼륨 0%로 해", "volume", 0)
+        self.assert_command("10초 앞으로", "seek", 10)
+        self.assert_command("십 초 뒤로 가 줘", "seek", -10)
+        self.assert_command("300초 뒤로", "seek", -300)
+        for text in ("볼륨 101퍼센트로 해", "볼륨 -1퍼센트", "볼륨 3.5퍼센트",
+                     "301초 앞으로", "0초 뒤로", "-10초 앞으로"):
+            with self.subTest(text=text):
+                command = media_module(self).parse_command(text)
+                self.assertEqual(command.action.value, "invalid")
+                self.assertTrue(command.value)
+
+    def test_negative_and_multi_intent_commands_cannot_execute(self):
+        for text in ("유튜브 열지 마", "영상 멈추지 마", "유튜브 재생하지 말아 줘",
+                     "볼륨 30퍼센트로 하지 마", "소리 안 꺼도 돼", "유튜브 검색 안 해도 돼",
+                     "유튜브에서 재즈 검색해 그리고 영상 멈춰", "don't pause YouTube"):
+            with self.subTest(text=text):
+                self.assert_command(text, "reject")
+
+    def test_unrelated_and_underspecified_requests(self):
+        parse = media_module(self).parse_command
+        for text in ("테스트 실행해", "반드시 영상 멈춰야 하는 정책", "개발 세션들 지금 뭐 해?",
+                     "play some jazz", "유튜브에서 재즈 재생해", "2번", "유튜브 정책 알려줘"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse(text))
+
+
+FIRST = {
+    "targetId": "tab-1",
+    "url": "https://www.youtube.com/watch?v=abcdefghijk",
+    "videoId": "abcdefghijk",
+    "title": "피아노 연주",
+    "paused": True,
+    "muted": False,
+    "volume": 0.5,
+    "currentTime": 20,
+    "duration": 200,
+}
+SECOND = {
+    **FIRST,
+    "targetId": "tab-2",
+    "url": "https://youtube.com/shorts/lmnopqrstuv",
+    "videoId": "lmnopqrstuv",
+    "title": "오케스트라 합주",
+}
+
+
+class AsideTransport:
+    def __init__(self, *receipts):
+        self.receipts = iter(receipts)
+        self.requests = []
+        self.commands = []
+
+    def __call__(self, args, **kwargs):
+        self.commands.append((args, kwargs))
+        script = args[-1]
+        bootstrap, static_script = script.split("\n", 1)
+        prefix = "const request = JSON.parse("
+        if not bootstrap.startswith(prefix) or not bootstrap.endswith(");"):
+            raise AssertionError("Expected a fixed JSON bootstrap")
+        self.requests.append(json.loads(json.loads(bootstrap[len(prefix):-2])))
+        if static_script != SCRIPT.read_text():
+            raise AssertionError("Action payload changed the static script")
+        receipt = next(self.receipts)
+        if isinstance(receipt, Exception):
+            raise receipt
+        stdout = receipt if isinstance(receipt, str) else json.dumps({"atticusMedia": receipt})
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+
+def listed(*videos):
+    return {"op": "list", "ok": True, "videos": list(videos)}
+
+
+def changed(op, before, **after):
+    return {"op": op, "ok": True, "before": before, "after": {**before, **after}}
+
+
+class MediaAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.media = media_module(self)
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        self.state = Path(state.name) / "media.json"
+
+    def adapter(self, *receipts):
+        transport = AsideTransport(*receipts)
+        return self.media.AsideMedia(transport=transport, state_path=self.state), transport
+
+    def test_negative_command_never_calls_aside(self):
+        adapter, transport = self.adapter()
+        self.assertIn("실행하지", adapter.handle("영상 멈추지 마"))
+        self.assertEqual(transport.requests, [])
+
+    def test_selects_unique_playing_video_for_verified_pause(self):
+        playing = {**SECOND, "paused": False}
+        adapter, transport = self.adapter(listed(FIRST, playing), changed("pause", playing, paused=True))
+        self.assertEqual(adapter.handle("영상 멈춰"), "영상을 일시 정지했어요.")
+        self.assertEqual([x["op"] for x in transport.requests], ["list", "pause"])
+        self.assertEqual(transport.requests[1]["target"], {
+            key: SECOND[key] for key in ("targetId", "url", "videoId")
+        })
+
+    def test_pause_acknowledgment_requires_observed_pause(self):
+        playing = {**FIRST, "paused": False}
+        adapter, _ = self.adapter(listed(playing), changed("pause", playing))
+        self.assertIn("확인할 수", adapter.handle("영상 멈춰"))
+
+    def test_ambiguous_prompt_survives_worker_restart_and_accepts_number(self):
+        adapter, transport = self.adapter(listed(FIRST, SECOND))
+        prompt = adapter.handle("계속 재생해")
+        self.assertIn("1번, 피아노 연주", prompt)
+        self.assertIn("2번, 오케스트라 합주", prompt)
+        self.assertEqual([x["op"] for x in transport.requests], ["list"])
+        self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o600)
+        adapter, transport = self.adapter(listed(SECOND, FIRST), changed("play", SECOND, paused=False))
+        self.assertTrue(adapter.recognizes("두 번째"))
+        self.assertTrue(adapter.recognizes("유튜브 2번"))
+        self.assertEqual(adapter.handle("유튜브 2번"), "영상을 재생했어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], SECOND["targetId"])
+        self.assertFalse(adapter.recognizes("2번"))
+        adapter, transport = self.adapter(
+            listed({**FIRST, "paused": False}, SECOND), changed("status", SECOND)
+        )
+        self.assertIn("오케스트라 합주", adapter.handle("지금 뭐 틀어져 있어?"))
+
+    def test_contextual_selection_accepts_unique_title(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        adapter.handle("소리 꺼")
+        adapter, transport = self.adapter(listed(FIRST, SECOND), changed("mute", FIRST, muted=True))
+        self.assertTrue(adapter.recognizes("피아노 연주"))
+        self.assertEqual(adapter.handle("피아노 연주 선택해 줘"), "영상의 소리를 껐어요.")
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_selection_title_with_missing_unicode_is_safe_to_store(self):
+        adapter, _ = self.adapter(listed({**FIRST, "title": "피아노\ud800 연주"}, SECOND))
+        self.assertIn("피아노 연주", adapter.handle("소리 꺼"))
+
+    def test_selected_identity_must_still_exist(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        adapter.handle("영상 멈춰")
+        adapter, transport = self.adapter(listed(FIRST))
+        self.assertIn("선택한 탭", adapter.handle("2번"))
+        self.assertEqual([x["op"] for x in transport.requests], ["list"])
+
+    def test_changed_video_and_closed_tab_cannot_be_reported_as_success(self):
+        other_video = {
+            **FIRST, "url": "https://www.youtube.com/watch?v=AAAAAAAAAAA", "videoId": "AAAAAAAAAAA"
+        }
+        for receipt in (
+            {"op": "pause", "ok": True, "before": FIRST, "after": other_video},
+            {"op": "pause", "ok": True, "before": other_video, "after": FIRST},
+            {"op": "pause", "ok": False, "error": "changed"},
+            {"op": "pause", "ok": False, "error": "missing"},
+        ):
+            with self.subTest(receipt=receipt):
+                adapter, _ = self.adapter(listed(FIRST), receipt)
+                self.assertIn("확인할 수", adapter.handle("영상 멈춰"))
+
+    def test_ignores_unrelated_and_spoofed_video_tabs(self):
+        adapter, transport = self.adapter(listed(
+            {**FIRST, "url": "https://youtube.com.attacker.test/watch?v=abcdefghijk"},
+            {**FIRST, "url": "https://example.test/?url=https://www.youtube.com/watch?v=abcdefghijk"},
+            {**FIRST, "url": "https://www.youtube.com/results?search_query=piano"},
+            {**FIRST, "url": "https://www.youtube.com/watch?v=AAAAAAAAAAA"},
+            {**FIRST, "url": "https://www.youtube.com:444/watch?v=abcdefghijk"},
+        ))
+        self.assertIn("영상 탭이", adapter.handle("영상 멈춰"))
+        self.assertEqual(len(transport.requests), 1)
+
+    def test_unloaded_video_keeps_truthful_reply(self):
+        unloaded = {**FIRST, "paused": None, "muted": None, "volume": None,
+                    "currentTime": None, "duration": None}
+        adapter, _ = self.adapter(listed(unloaded), {"op": "play", "ok": False, "error": "unloaded"})
+        self.assertIn("플레이어", adapter.handle("계속 재생해"))
+
+    def test_volume_uses_observed_state(self):
+        for actual, expected in [(0.3, "영상 볼륨을 30퍼센트로 맞췄어요."), (0.5, "확인할 수")]:
+            with self.subTest(actual=actual):
+                adapter, _ = self.adapter(listed(FIRST), changed("volume", FIRST, volume=actual))
+                self.assertIn(expected, adapter.handle("볼륨 30퍼센트로 해"))
+
+    def test_seek_requires_actual_position_and_clamps_at_start(self):
+        at_start = {**FIRST, "currentTime": 3}
+        adapter, _ = self.adapter(listed(at_start), changed("seek", at_start, currentTime=0))
+        self.assertIn("처음", adapter.handle("10초 뒤로"))
+        adapter, _ = self.adapter(listed(FIRST), changed("seek", FIRST))
+        self.assertIn("확인할 수", adapter.handle("10초 앞으로"))
+
+    def test_search_only_passes_encoded_query_and_checks_destination(self):
+        query = '재즈 & 단어 "]); malicious();"'
+        search_url = (
+            "https://www.youtube.com/results?search_query="
+            "%EC%9E%AC%EC%A6%88+%26+%EB%8B%A8%EC%96%B4+%22%5D%29%3B+malicious%28%29%3B%22"
+        )
+        adapter, transport = self.adapter({"op": "search", "ok": True, "url": search_url})
+        self.assertEqual(adapter.handle(f"유튜브에서 {query} 검색해"), "유튜브에 검색 결과를 열었어요.")
+        self.assertEqual(transport.requests, [{"op": "search", "url": search_url}])
+        args, kwargs = transport.commands[0]
+        self.assertEqual(args[:3], ["aside", "repl", "--json"])
+        self.assertFalse(kwargs.get("shell"))
+        self.assertGreater(kwargs["timeout"], 0)
+        adapter, _ = self.adapter({"op": "search", "ok": True, "url": FIRST["url"]})
+        self.assertIn("확인할 수", adapter.handle(f"유튜브에서 {query} 검색해"))
+
+    def test_cli_json_receipt_can_be_inside_console_output(self):
+        receipt = {"atticusMedia": {"op": "open", "ok": True, "url": "https://www.youtube.com/"}}
+        output = json.dumps({"run": {"content": [{"type": "text", "text": json.dumps(receipt)}],
+                                     "error": None, "elapsedMs": 7}})
+        adapter, _ = self.adapter(output)
+        self.assertEqual(adapter.handle("유튜브 열어"), "유튜브를 열었어요.")
+
+    def test_timeout_missing_binary_and_corrupt_receipts_are_failures(self):
+        for output in (
+            subprocess.TimeoutExpired("aside", 1), FileNotFoundError("aside"),
+            "<not JSON>", '{"atticusMedia": {"op": "list", "ok": true, "videos": false}}',
+        ):
+            with self.subTest(output=output):
+                adapter, _ = self.adapter(output)
+                self.assertIn("확인할 수", adapter.handle("영상 멈춰"))
+
+
+@unittest.skipUnless(shutil.which("node"), "Node is needed for static JS fixtures")
+class MediaScriptTests(unittest.TestCase):
+    """Run the static script against in-memory tab and video objects."""
+    HARNESS = """
+        const fs = require("node:fs");
+        const request = JSON.parse(process.argv[1]);
+        const fixture = process.argv[2];
+        const original = request.target.url;
+        const replacement = "https://www.youtube.com/watch?v=AAAAAAAAAAA";
+        const location = globalThis.location = {href: original};
+        let calls = 0;
+        let currentTime = 20;
+        const player = {getVideoData: () => ({
+            video_id: new URL(location.href).searchParams.get("v")
+        })};
+        const video = {
+            paused: false, muted: false, volume: 0.5, duration: 200,
+            readyState: 2, seeking: false,
+            get currentTime() { return currentTime; },
+            set currentTime(value) {
+                this.seeking = true;
+                this.seekTarget = value;
+            },
+            addEventListener(event, callback) {
+                if (event === "seeked") setImmediate(() => {
+                    currentTime = this.seekTarget;
+                    this.seeking = false;
+                    callback();
+                });
+            },
+            removeEventListener() {},
+            closest: (selector) => selector === ".html5-video-player" ? player : null,
+            pause: () => {
+                calls++;
+                if (fixture === "changesAfter") location.href = replacement;
+                video.paused = true;
+            },
+        };
+        globalThis.document = {
+            title: "Fixture - YouTube",
+            querySelector: () => null,
+            querySelectorAll: (selector) => fixture === "noPlayer" ? [] : [video],
+        };
+        const listBrowserTabs = async () => [{
+            targetId: request.target.targetId, url: location.href, title: document.title,
+        }];
+        const attachBrowserTab = async () => ({
+            evaluate: async (fn, arg) => {
+                if (fixture === "changesBefore") location.href = replacement;
+                return fn(arg);
+            },
+        });
+        const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        const script = fs.readFileSync(process.argv[3], "utf8");
+        const run = new AsyncFunction("request", "listBrowserTabs", "attachBrowserTab", script);
+        run(request, listBrowserTabs, attachBrowserTab)
+            .then(() => console.log(JSON.stringify({calls})));
+    """
+
+    def run_script(self, fixture, op="pause", **params):
+        self.assertTrue(SCRIPT.is_file(), "The Aside action script is missing")
+        request = {"op": op, "target": {key: FIRST[key] for key in ("targetId", "url", "videoId")}, **params}
+        process = subprocess.run(
+            ["node", "-e", self.HARNESS, json.dumps(request), fixture, str(SCRIPT)],
+            capture_output=True, check=True, text=True, timeout=3,
+        )
+        receipt, details = [json.loads(line) for line in process.stdout.splitlines()]
+        return receipt["atticusMedia"], details["calls"]
+
+    def test_static_script_reads_actual_paused_player(self):
+        receipt, calls = self.run_script("normal")
+        self.assertTrue(receipt["ok"])
+        self.assertIs(receipt["before"]["paused"], False)
+        self.assertIs(receipt["after"]["paused"], True)
+        self.assertEqual(calls, 1)
+
+    def test_static_script_does_not_touch_wrong_video_or_unloaded_player(self):
+        for fixture, error in [("changesBefore", "changed"), ("noPlayer", "unloaded")]:
+            with self.subTest(fixture=fixture):
+                receipt, calls = self.run_script(fixture)
+                self.assertFalse(receipt["ok"])
+                self.assertEqual(receipt["error"], error)
+                self.assertEqual(calls, 0)
+
+    def test_static_script_waits_for_completed_seek_before_reading_position(self):
+        receipt, _ = self.run_script("normal", "seek", value=10)
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["before"]["currentTime"], 20)
+        self.assertEqual(receipt["after"]["currentTime"], 30)
+
+    def test_static_script_detects_replacement_after_action(self):
+        receipt, calls = self.run_script("changesAfter")
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["error"], "changed")
+        self.assertEqual(calls, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
