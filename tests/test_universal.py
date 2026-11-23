@@ -270,11 +270,14 @@ class UniversalTests(unittest.TestCase):
             self.assertEqual(atticus.fast.cmds, [])
 
     def test_polite_opens_take_the_fast_path_but_bare_words_and_tasks_do_not(self):
+        # Exercise the retained upstream fast path independently of the fork's
+        # explicitly scoped YouTube adapter, whose receipts are tested separately.
         ok = subprocess.CompletedProcess([], 0)
         (self.root / 'Downloads').mkdir()
         with patch.object(atticus, 'skills', return_value={}), patch.object(atticus, 'fast_hands', return_value=None), patch.object(atticus, 'free_focus'), \
              patch.object(atticus, 'HOME', str(self.root)), patch.object(atticus, 'app_named', side_effect=lambda name: 'Fixture' if name == 'fixture' else None), \
-             patch.object(atticus, 'LAST', str(self.root / 'last_app')), patch.object(atticus.subprocess, 'run', return_value=ok) as run, patch.object(atticus, 'show') as show:
+             patch.object(atticus, 'LAST', str(self.root / 'last_app')), patch.object(atticus.subprocess, 'run', return_value=ok) as run, patch.object(atticus, 'show') as show, \
+             patch('assistant.commands.recognizes', return_value=False):
             self.assertEqual(atticus.fast('Can you open up unfamiliar.com?'), 'Opened unfamiliar.com.')
             self.assertEqual(run.call_args.args[0], ['open', 'https://unfamiliar.com'])
             self.assertEqual(atticus.fast('Um, could you please open up Fixture for me?'), 'Opened Fixture.')

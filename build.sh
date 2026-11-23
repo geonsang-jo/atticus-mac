@@ -1,6 +1,9 @@
 #!/bin/bash
 # Installs Atticus: builds Atticus.app, starts it at login, and (re)starts it now. Run it again after any change.
 set -e; cd "$(dirname "$0")"
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode.app/Contents/Developer ]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 VERSION=$(tr -d '\n' < VERSION)
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid VERSION: $VERSION"; exit 1; }
 IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH <<< "$VERSION"
@@ -14,10 +17,14 @@ command -v claude >/dev/null || [ -x ~/.local/bin/claude ] || echo "Note: Claude
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 # A compiler error must leave the installed app and its resources alone.
-swiftc -O -target "$(uname -m)-apple-macos26.0" Atticus.swift -o "$STAGE/Atticus"
+OPTIMIZATION=-O
+[ "${ATTICUS_DEBUG_BUILD:-}" != 1 ] || OPTIMIZATION=-Onone
+swiftc "$OPTIMIZATION" -target "$(uname -m)-apple-macos26.0" Atticus.swift -o "$STAGE/Atticus"
 APP="$STAGE/Atticus.app"   # stage resources and signing before replacing the installed app
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/ui"
 cp atticus.py "$APP/Contents/Resources/"
+cp -R assistant "$APP/Contents/Resources/"
+find "$APP/Contents/Resources/assistant" -type d -name __pycache__ -prune -exec rm -rf {} +
 cp ui/*.html ui/*.js ui/*.css "$APP/Contents/Resources/ui/"
 cp ui/AppIcon.icns "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<P
@@ -41,6 +48,15 @@ cat > "$APP/Contents/Info.plist" <<P
 </dict></plist>
 P
 mv "$STAGE/Atticus" "$APP/Contents/MacOS/Atticus"
+# A local verification build neither installs a certificate nor changes Login Items.
+if [ "${ATTICUS_LOCAL_BUILD:-}" = 1 ]; then
+  codesign -s - --force "$APP"
+  mkdir -p work
+  if [ -e work/Atticus.app ]; then mv work/Atticus.app "$STAGE/previous-local.app"; fi
+  mv "$APP" work/Atticus.app
+  echo "Built $(pwd)/work/Atticus.app"
+  exit 0
+fi
 # With a code-signing identity named "Atticus Local Signing" in the keychain, macOS keeps permissions across
 # rebuilds and auto-updates; ad hoc signing would ask for every permission again after each one. So make it once.
 ID=$(security find-identity -p codesigning | awk '/Atticus Local Signing/{print $2; exit}')

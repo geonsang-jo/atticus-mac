@@ -8,7 +8,8 @@ from tests import run_swift
 class BoxSizeTests(unittest.TestCase):
     def test_saved_width_and_frame_fit_current_screen(self):
         source = (Path(__file__).resolve().parents[1] / 'Atticus.swift').read_text()
-        width = source[source.index('func boxWidth('):source.index('final class App:')]
+        begin = source.index('func boxWidth(')
+        width = source[begin:source.index('\n}\n', begin) + 3]
         clamp = source[source.index('    static func clamp(', source.index('enum MeetingFrame')):source.index('    // The same frame on another display:')]
         harness = 'import Cocoa\n' + width + '\nenum MeetingFrame {\n' + clamp + '}\n' + r'''
 for bounds in [NSRect(x: 0, y: 0, width: 1024, height: 700),

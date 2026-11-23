@@ -455,11 +455,11 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
 
     def test_key_down_worker_is_replaced_when_the_ask_needs_another_model(self):
         with patch.object(atticus, 'stop_claude') as stop:
-            brain, start, _, _ = self.routing_ask({'routing':'balanced'}, [('Step one.',True,[])], warm=True, task='Teach me how to use orca.')
+            brain, start, _, _ = self.routing_ask({'routing':'balanced', 'assistantMode':False}, [('Step one.',True,[])], warm=True, task='Teach me how to use orca.')
         self.assertEqual(start.call_args_list, [unittest.mock.call(), unittest.mock.call('sonnet')])   # key-down guess, then the routed model
         stop.assert_called_with(start.return_value)
         with patch.object(atticus, 'stop_claude') as stop:
-            _, start, _, _ = self.routing_ask({'routing':'balanced'}, [('Opened.',True,[])], warm=True)
+            _, start, _, _ = self.routing_ask({'routing':'balanced', 'assistantMode':False}, [('Opened.',True,[])], warm=True)
         self.assertEqual(start.call_args_list, [unittest.mock.call()]); stop.assert_not_called()   # a Haiku worker for an easy ask is kept
         with patch.object(atticus, 'start_claude') as claude, patch.object(atticus, 'pref', side_effect=lambda k,d:d):
             atticus.start_ai()
@@ -563,7 +563,7 @@ print(json.dumps({{"type": "result", "is_error": True, "result": "Authentication
     def test_upgrade_after_same_model_retry_keeps_one_relay_consumer(self):
         answers = iter(['r', 'n'])
         with patch.dict(os.environ, {'ATTICUS_UI':'1'}):
-            brain, start, ask, log = self.routing_ask({'routing':'cheapest'},
+            brain, start, ask, log = self.routing_ask({'routing':'cheapest', 'assistantMode':False},
                 [('Rate limited.',False,[]), ('Answer.',True,['inspect'])],
                 retry=lambda *a: next(answers), why=['rate_limited',''], warm=True)
         self.assertEqual(brain.call_count, 2)

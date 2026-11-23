@@ -117,9 +117,10 @@ precondition(launches == 2,"movement bypassed Plip classification")
                 self.assertEqual(list(Path(root).iterdir()), [])
 
     def test_native_pen_is_click_through_and_gone_on_release(self):
-        from tests import run_swift
+        from tests import run_swift, swift_motion
         swift = (Path(atticus.__file__).parent/'Atticus.swift').read_text()
-        pen = swift[swift.index('final class DrawingPanel:'):swift.index('struct DrawingShape:')] + swift[swift.index('final class TalkPen:'):swift.index('final class App:')]
+        begin = swift.index('final class TalkPen:')
+        pen = swift[swift.index('final class DrawingPanel:'):swift.index('struct DrawingShape:')] + swift[begin:swift.index('\n}\n', begin) + 3] + swift_motion(swift)
         decision = swift[swift.index('    var talkMoved: Bool {'):swift.index('    func sampleTalkPointer()')]
         cancel = swift[swift.index('    func stopOfferInput()'):swift.index('        unwarm()', swift.index('    func stopOfferInput()'))]
         state = 'final class Engine { var stopped = false; func stop() { stopped = true } }\n' + \

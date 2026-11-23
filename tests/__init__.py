@@ -3,6 +3,14 @@ import atexit
 import os
 import tempfile
 
+# Some tests deliberately clear os.environ. Preserve the requested compiler
+# selection without changing this Mac's global xcode-select setting.
+_swift_toolchain = {k: os.environ[k] for k in ('DEVELOPER_DIR', 'SDKROOT', 'TOOLCHAINS') if k in os.environ}
+
+
+def swift_env():
+    return {**os.environ, **_swift_toolchain}
+
 config = tempfile.TemporaryDirectory(prefix='atticus-test-config-')
 os.environ['ATTICUS_DIR'] = config.name
 os.environ['ATTICUS_POSTHOG_KEY'] = ''   # tests that clear os.environ also drop ATTICUS_DIR; with no key nothing reaches PostHog
@@ -34,7 +42,7 @@ def run_swift(test, source, timeout=10):
     with tempfile.TemporaryDirectory() as root:
         path, binary = Path(root) / 'test.swift', Path(root) / 'test'
         path.write_text(source)
-        result = subprocess.run(['swiftc', str(path), '-o', str(binary)], capture_output=True, text=True)
+        result = subprocess.run(['swiftc', str(path), '-o', str(binary)], capture_output=True, text=True, env=swift_env())
         test.assertEqual(result.returncode, 0, result.stderr)
         result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=timeout)
         test.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -52,7 +60,7 @@ if not os.environ.get('ATTICUS_VM') and not os.environ.get('ATTICUS_ALLOW_HOST_U
         first = args if isinstance(args, (str, bytes, os.PathLike)) else (args[0] if args else '')
         exe = os.path.realpath(str(first).split()[0]) if first else ''
         name = os.path.basename(exe)
-        if exe.startswith(_tmp) or name in ('osascript', 'open', 'Atticus', 'swift') or '/Atticus.app/' in exe:
+        if exe.startswith(_tmp) or name in ('osascript', 'open', 'Atticus', 'swift', 'aside') or '/Atticus.app/' in exe:
             raise unittest.SkipTest(f'host guard: {name} runs only in the VM (run.sh)')
         _popen_init(self, args, *a, **k)
     subprocess.Popen.__init__ = _guarded

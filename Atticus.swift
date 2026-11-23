@@ -195,7 +195,7 @@ enum Prefs {
             ["name": "Technical", "text": "Precise terms, numbers and how it works. Name the tradeoff."],
             ["name": "Friendly", "text": "Warm and conversational, like talking to a colleague. Simple words."]],
         "selection": true, "ahead": true, "aheadDelay": 0.7, "live": true, "screen": "auto", "openOn": "here", "workIn": "back", "miniScreen": true, "draw": true, "guideSteps": "auto", "pageJS": false,
-        "speak": true, "showAnswers": "stream", "autoCopy": false, "hideWhenSharing": true, "menuIcon": true, "autoUpdate": true,
+        "speak": true, "showAnswers": "stream", "autoCopy": false, "hideWhenSharing": true, "menuIcon": true, "autoUpdate": false,
         "learn": true, "safe": true, "pointer": false, "meeting": false, "meetingSave": true, "meetingAuto": "sure", "meetingNudge": false, "meetingDetect": true, "learnMe": true, "saveChats": true, "stats": true, "tips": true, "support": true, "comeBack": true, "askMe": true, "meetingSummary": true, "typeRight": true, "talkMode": "hold", "uiLanguage": "auto", "speechModel": "speech", "whisperModel": "turbo", "whisperLanguage": "auto", "improve": false, "improveAsked": false, "draftInsert": "ask",
         "dictateHotkeyCode": -1, "dictateHotkeyMods": 0, "dictateHotkeyLabel": "", "dictateMode": "cleanup", "dictateHistory": true, "dictateLearn": true, "dictateWords": [], "dictateFixes": [String: String](), "boxW": 500, "boxH": 420, "autoMinimize": true, "tinyFold": false,
         "voiceRate": 196]   // say's words a minute; its own 175 dragged through spoken steps
@@ -929,6 +929,8 @@ func py(_ args: [String], _ extra: [String: String] = [:]) -> Process {
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
     env["ATTICUS_APP"] = Bundle.main.executablePath
+    env["ATTICUS_OWNER_PID"] = String(getpid())
+    if Prefs.bool("assistantMode") { env["ATTICUS_POSTHOG_KEY"] = "" }
     env.merge(extra) { $1 }
     p.environment = env
     return p
@@ -5986,6 +5988,123 @@ final class RoutineWake {
     }
 }
 
+struct AssistantNoticeQueue {
+    var items: [(String, String)] = []
+    var seen: [String] = []
+    mutating func append(_ notices: [[String: Any]]) {
+        for notice in notices {
+            guard let id = notice["id"] as? String, !id.isEmpty, id.count <= 200,
+                  let text = notice["text"] as? String, !text.isEmpty, text.count <= 1200,
+                  !seen.contains(id) else { continue }
+            seen.append(id); items.append((id, text))
+        }
+        if seen.count > 256 { seen.removeFirst(seen.count - 256) }
+    }
+    mutating func take(ready: Bool) -> (id: String, text: String)? {
+        guard ready, !items.isEmpty else { return nil }
+        let notice = items.removeFirst()
+        return (notice.0, notice.1)
+    }
+}
+
+// The observer owns waiting work. Directory events wake a bounded native inbox;
+// a timer checks readiness without launching a worker when nothing changed.
+final class AssistantWake {
+    var source: DispatchSourceFileSystemObject?, timer: Timer?
+    var pending = true, draining = false
+    var ensuring = false, nextEnsure = Date.distantPast
+    var queue = AssistantNoticeQueue()
+    var acknowledgements = Set<String>(), acknowledging = false
+    init() {
+        let path = (Prefs.path as NSString).deletingLastPathComponent + "/assistant"
+        try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        let fd = open(path, O_EVTONLY)
+        if fd >= 0 {
+            source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+            source?.setEventHandler { [weak self] in self?.pending = true }
+            source?.setCancelHandler { close(fd) }
+            source?.resume()
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        ensureObserver()
+    }
+    func ensureObserver() {
+        guard !ensuring else { return }
+        ensuring = true
+        DispatchQueue.global().async { [weak self] in
+            let p = py(["--assistant-start", String(getpid())]), output = Pipe()
+            p.standardOutput = output
+            var started = false
+            do {
+                try p.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                started = p.terminationStatus == 0 && ((try? JSONSerialization.jsonObject(with: data)) as? [String: Bool])?["started"] == true
+            }
+            catch { NSLog("Assistant observer could not start: %@", error.localizedDescription) }
+            let retry = started ? 30.0 : 3.0
+            DispatchQueue.main.async {
+                self?.ensuring = false; self?.nextEnsure = Date().addingTimeInterval(retry)
+            }
+        }
+    }
+    var ready: Bool {
+        !Prefs.bool("paused") && !app.wakeSuspended && !app.engine.isRunning && !app.dictating && !app.releasePending &&
+        !app.busy && !app.composing && app.voice == nil && app.speechQueue.isEmpty && onboarding.win == nil && !meeting.running
+    }
+    func tick() {
+        if Date() >= nextEnsure { ensureObserver() }
+        acknowledge()
+        if let notice = queue.take(ready: ready) {
+            app.show(); app.js("notice", notice.text)
+            app.speechSentences = SpeechSentences(); app.speechVoice = nil; app.speechMuted = false
+            app.streamSpeech(notice.text, final: true)
+            acknowledgements.insert(notice.id); acknowledge()
+            return
+        }
+        guard pending, ready, queue.items.isEmpty, !draining else { return }
+        pending = false; draining = true
+        DispatchQueue.global().async { [weak self] in
+            let p = py(["--assistant-peek"]), output = Pipe()
+            p.standardOutput = output
+            var notices: [[String: Any]] = []
+            do {
+                try p.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                if p.terminationStatus == 0 { notices = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? [] }
+            } catch { NSLog("Assistant inbox could not be read: %@", error.localizedDescription) }
+            let received = notices
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.queue.append(received); self.draining = false
+            }
+        }
+    }
+    func acknowledge() {
+        guard !acknowledging, !acknowledgements.isEmpty else { return }
+        acknowledging = true
+        let ids = Array(acknowledgements.prefix(64))
+        let data = try! JSONSerialization.data(withJSONObject: ids)
+        let argument = String(data: data, encoding: .utf8)!
+        DispatchQueue.global().async { [weak self] in
+            let p = py(["--assistant-ack", argument]), output = Pipe()
+            p.standardOutput = output
+            var acknowledged = false
+            do {
+                try p.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                acknowledged = p.terminationStatus == 0 && ((try? JSONSerialization.jsonObject(with: data)) as? [String: Int])?["acknowledged"] != nil
+            } catch { NSLog("Assistant receipt could not be acknowledged: %@", error.localizedDescription) }
+            let accepted = acknowledged
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if accepted { ids.forEach { self.acknowledgements.remove($0) } }
+                self.acknowledging = false
+            }
+        }
+    }
+}
+
 // First-run window (ui/onboarding.html): welcome, the macOS permissions, the AI, one live try of the shortcut, then things to try.
 // Shows until finished once; to see it again: defaults delete com.atticus.app onboarded, then restart the app.
 final class Onboarding: NSObject, WKScriptMessageHandler, NSWindowDelegate {
@@ -10055,6 +10174,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.wakeTick() }
 let agentsUI = AgentPanels()
 let routineWake = RoutineWake()
 let onboarding = Onboarding()
+let assistantWake = AssistantWake()
 if !UserDefaults.standard.bool(forKey: "onboarded") || UserDefaults.standard.string(forKey: "setupPage") != nil { DispatchQueue.main.async { onboarding.open() } }
 else if !Prefs.bool("assistantMode") { Onboarding.plan { c in if c["ok"] as? Bool != true { onboarding.open(automatic: true) } } }   // set up once, but Claude signed out since
 // An idea only while the user is at the Mac and nothing else wants them: no call, sharing, full-screen app, setup, or Atticus in use.

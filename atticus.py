@@ -2508,6 +2508,10 @@ def fast(text):
     fast.cmds = []
     fast.shortcut = fast.failed = None
     text = text.strip()
+    from assistant import commands as assistant_commands
+    if assistant_commands.recognizes(text):
+        if os.environ.get('ATTICUS_LIVE') == '1' or not wait_commit(): return None
+        return assistant_commands.handle(text)
     named = named_shortcut(text)
     if named and pref('learn', True):
         if os.environ.get('ATTICUS_LIVE') == '1': return None
@@ -8901,6 +8905,36 @@ def feedback(data):
 
 def main():
     args = sys.argv[1:]
+    if args[:1] in (['--assistant-start'], ['--assistant-daemon']):
+        from assistant import monitor
+        if len(args) != 2 or not args[1].isdigit() or int(args[1]) <= 1:
+            print('A valid native owner PID is required.', file=sys.stderr)
+            return sys.exit(2)
+        if args[0] == '--assistant-daemon': return monitor.run_daemon(int(args[1]))
+        return print(json.dumps({'started': monitor.ensure_daemon(int(args[1]))}))
+    if args == ['--assistant-pop']:
+        from assistant.monitor import pop_notifications
+        return print(json.dumps(pop_notifications(), ensure_ascii=False))
+    if args == ['--assistant-peek']:
+        from assistant.monitor import peek_notifications
+        return print(json.dumps(peek_notifications(), ensure_ascii=False))
+    if args[:1] == ['--assistant-ack']:
+        from assistant.monitor import ack_notifications
+        try:
+            if len(args) != 2: raise ValueError('Use --assistant-ack IDS_JSON')
+            return print(json.dumps({'acknowledged': ack_notifications(json.loads(args[1]))}))
+        except (OSError, ValueError, TypeError) as error:
+            print(str(error), file=sys.stderr)
+            return sys.exit(2)
+    if args[:1] == ['--assistant-register-test']:
+        from assistant.test_runs import register_test
+        try:
+            if len(args) != 4: raise ValueError('Use --assistant-register-test NAME CWD ARGV_JSON')
+            result = register_test(args[1], args[2], json.loads(args[3]))
+            return print(json.dumps(result, ensure_ascii=False))
+        except (OSError, ValueError, TypeError) as error:
+            print(str(error), file=sys.stderr)
+            return sys.exit(2)
     if args == ['--gesture']:
         try:
             request = json.loads(sys.stdin.read(400000))
@@ -9241,7 +9275,7 @@ def main():
     state_dir = tempfile.mkdtemp(prefix='atticus-hands-')
     atexit.register(shutil.rmtree, state_dir, True)
     os.environ['ATTICUS_HANDS_STATE'] = os.path.join(state_dir, 'hands.json')
-    warm = start_ai() if args == ['--wait'] else None   # Atticus.app: started at key-down, request comes on stdin at release
+    warm = start_ai() if args == ['--wait'] and not pref('assistantMode', True) else None   # built-ins need no model or screen read
     os.environ['ATTICUS_ASK'] = warm.ask if warm else state_dir
     shots = []
     snap = threading.Thread(target=lambda: shots.extend(look()), daemon=True)   # only started when readable context is thin
@@ -9267,7 +9301,7 @@ def main():
             summary_timing.update(secs=round(time.monotonic() - started, 3), status='failed')
     reading = threading.Thread(target=read_front, daemon=True)
     reading_started = False
-    if args == ['--wait'] and not selection_context() and pref('screen', 'auto') != 'never':
+    if args == ['--wait'] and not pref('assistantMode', True) and not selection_context() and pref('screen', 'auto') != 'never':
         reading.start()   # key-down: the bounded read overlaps speech
         reading_started = True
     displays = threading.Thread(target=lambda: displays.screens.extend(screens()), daemon=True)   # key-down too: off the path to the model
@@ -9287,6 +9321,11 @@ def main():
     task = task if args == ['--wait'] else ' '.join(a for a in args if a != '--plan') or ask()
     if not task:
         return warm and stop_claude(warm)
+    from assistant import commands as assistant_commands
+    if '--plan' not in args and assistant_commands.recognizes(task):
+        if not wait_commit(): return warm and stop_claude(warm)
+        if warm: stop_claude(warm)
+        return say('✓', assistant_commands.handle(task))
     marked, marked_images = point_context(marks)
     for path, _ in marked_images:
         atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))

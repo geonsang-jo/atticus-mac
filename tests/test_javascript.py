@@ -99,12 +99,16 @@ const ui={''' + dictate + '''};ui.dictate(true);if(bars.some(b=>b.style.height)|
         source = (Path(__file__).resolve().parents[1] / 'ui' / 'onboarding.html').read_text()
         helper = source[source.index('  const paintDone ='):source.index('\n  const capsOf', source.index('  const paintDone ='))]
         script = '''
-const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{textContent:''});return nodes.get(id)};let toggleMode=false,doneNext='';
+const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{textContent:''});return nodes.get(id)};let builtin=false,toggleMode=false,doneNext='';
 ''' + helper + '''
 paintDone({claude:false,mic:true,speech:false,ax:false});
 if($('done-title').textContent!=='Setup isn’t finished yet'||!$('done-sub').textContent.includes('AI provider, Accessibility, Speech Recognition, Screen & System Audio Recording')||doneNext!=='Finish Setup Later')process.exit(1);
 paintDone({claude:true,mic:false,speech:false,ax:false});
 if($('done-title').textContent!=='AI is ready'||doneNext!=='Start Using Atticus')process.exit(2);
+builtin=true; paintDone({claude:false,mic:true,speech:true,ax:false});
+if($('done-title').textContent!=='음성 권한 설정 완료'||doneNext!=='시작하기')process.exit(3);
+builtin=true; paintDone({claude:true,mic:true,speech:false,ax:true});
+if($('done-title').textContent!=='음성 권한이 필요합니다')process.exit(4);
 '''
         result = subprocess.run(['node', '--input-type=module'], input=script, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

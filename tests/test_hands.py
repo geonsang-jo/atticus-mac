@@ -15,6 +15,7 @@ import unittest.mock
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import atticus
+from tests import swift_env
 
 
 class HandsTests(unittest.TestCase):
@@ -110,7 +111,7 @@ precondition(try! String(contentsOfFile:path, encoding:.utf8) == "y")
 '''
         path, binary = Path(self.root.name, 'permission.swift'), Path(self.root.name, 'permission')
         path.write_text(swift)
-        compiled = subprocess.run(['swiftc', str(path), '-o', str(binary)], capture_output=True, text=True)
+        compiled = subprocess.run(['swiftc', str(path), '-o', str(binary)], capture_output=True, text=True, env=swift_env())
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         result = subprocess.run([str(binary), str(Path(self.root.name, 'answer'))], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

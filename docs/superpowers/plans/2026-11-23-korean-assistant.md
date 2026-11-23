@@ -12,7 +12,7 @@
 
 - The approved spec is docs/superpowers/specs/2026-11-23-korean-assistant-design.md; the user has approved implementation and geonsang-jo fork.
 - Highest priority: keyboard-free wake invocation whenever awake and unlocked, including with overlay visible and background watches/tests running. English invocation is acceptable as a fallback but Korean is the intended default.
-- Default phrase: 헤이 아티. Configurable wakeLanguage and speechLanguage independent of interface language; English supported.
+- Default phrase: 컴퓨터야. Configurable wakeLanguage and speechLanguage independent of interface language; English supported.
 - Every new command requires a wake phrase. Do not auto-capture YouTube audio after a reply. Own TTS suppresses wake briefly then restores it. Two-stage phrase, chime, command is the v1 contract.
 - Python parsers and adapters execute only on final confirmed transcription, never speculative/live partial output.
 - Actual browser interaction/QA must use mcp__aside__repl. Runtime Aside adapter uses a fixed script via argv, not shell or generated model code.

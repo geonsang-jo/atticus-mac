@@ -41,9 +41,9 @@ class UpdaterTests(unittest.TestCase):
         (app / 'MacOS').mkdir(parents=True); (app / 'Resources').mkdir()
         for name in ['Info.plist', 'MacOS/Atticus', 'Resources/atticus.py']:
             (app / name).write_text('old app')
-        source = self.root / 'build-source'; source.mkdir(); (source / 'ui').mkdir()
+        source = self.root / 'build-source'; source.mkdir(); (source / 'ui').mkdir(); (source / 'assistant').mkdir()
         (source / 'build.sh').write_text((ROOT / 'build.sh').read_text())
-        for name in ['Atticus.swift', 'atticus.py', 'ui/page.html', 'ui/page.js', 'ui/page.css', 'ui/AppIcon.icns']:
+        for name in ['Atticus.swift', 'atticus.py', 'assistant/__init__.py', 'ui/page.html', 'ui/page.js', 'ui/page.css', 'ui/AppIcon.icns']:
             (source / name).write_text('new app')
         (source / 'VERSION').write_text('1.6.1')
         commands = self.root / 'bin'; commands.mkdir()
