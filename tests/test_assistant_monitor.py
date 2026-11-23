@@ -122,3 +122,42 @@ else:
         self.assertTrue(monitor.recognizes("2번"))
         self.assertIn("t2", monitor.handle("세션 2번"))
         self.assertFalse(monitor.recognizes("2번"))
+
+    def test_watch_started_between_turn_and_status_still_notifies(self):
+        self.publish(snapshot(7, terminal(state="working", turn=3)))
+        self.publish(event(8, "turn", {"turn": 4}))
+        self.assertIn("알려드릴게요", monitor.handle("herdr 세션 끝나면 알려줘"))
+        self.publish(event(9, "status", {"status": {"state": "done"}}))
+        self.assertEqual(len(monitor.pop_notifications()), 1)
+
+    def test_held_daemon_lease_requires_the_same_live_owner(self):
+        context = multiprocessing.get_context("spawn")
+        owner = context.Process(target=time.sleep, args=(30,))
+        owner.start()
+        try:
+            lease = monitor._acquire_lease()
+            try:
+                with monitor._state(write=True) as state:
+                    state["herdr"] = {"owner": monitor._process_identity(owner.pid),
+                                      "daemon": monitor._process_identity(os.getpid())}
+                with patch.object(monitor, "_DAEMON_START_SECONDS", 0.2, create=True):
+                    self.assertTrue(monitor.ensure_daemon(owner.pid))
+                    self.assertFalse(monitor.ensure_daemon(os.getpid()))
+            finally:
+                os.close(lease)
+        finally:
+            owner.terminate()
+            owner.join(3)
+
+    def test_page_keeps_stable_ordinals_for_all_sessions(self):
+        records = [terminal(f"t{index}", pid=50 + index) for index in range(1, 12)]
+        self.publish(snapshot(7, *records))
+        initial = monitor.handle("herdr 세션 끝나면 알려줘")
+        self.assertIn("1번", initial)
+        self.assertIn("다음 세션 목록", initial)
+        self.assertNotIn("9번", initial)
+        self.publish(snapshot(8, *reversed(records)))
+        self.assertTrue(monitor.recognizes("다음 세션 목록"))
+        self.assertIn("9번 fixture t9", monitor.handle("다음 세션 목록"))
+        self.assertIn("1번 fixture t1", monitor.handle("이전 세션 목록"))
+        self.assertIn("t9", monitor.handle("세션 9번"))

@@ -25,7 +25,9 @@ from .sessions import SessionStream
 _MAX_WATCHES = 16
 _MAX_NOTIFICATIONS = 64
 _SELECTION_SECONDS = 120
+_PAGE_SIZE = 8
 _STREAM_SECONDS = 50
+_DAEMON_START_SECONDS = 2.5
 _LEASE_FD = "ATTICUS_ASSISTANT_LEASE_FD"
 _OWNER_BIRTH = "ATTICUS_ASSISTANT_OWNER_BIRTH"
 _STATES = {
@@ -56,7 +58,8 @@ def _lock_fd(name):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
             raise OSError("Invalid assistant lock file")
-        os.fchmod(fd, 0o600)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
         return fd
     except OSError:
         os.close(fd)
@@ -123,12 +126,14 @@ def pop_notifications() -> list[dict]:
         return []
 
 
-def _publish(reducer, completions, daemon=None):
+def _publish(reducer, completions, daemon=None, owner=None):
+    sessions = reducer.sessions if reducer else []
+    for item in sessions:
+        item["watch_watermark"] = reducer.watch_watermark(item)
     with _state(write=True) as state:
         state["herdr"] = {
-            "connected": bool(reducer and reducer.connected),
-            "sessions": reducer.sessions if reducer else [],
-            "published": time.time(), "daemon": daemon,
+            "connected": bool(reducer and reducer.connected), "sessions": sessions,
+            "published": time.time(), "daemon": daemon, "owner": owner,
         }
         watches = state.get("watches", {})
         for item in completions:
@@ -212,25 +217,37 @@ def _acquire_lease():
 
 
 def ensure_daemon(owner_pid: int) -> bool:
-    """Start an observer whose lifetime is tied to the calling native app."""
+    """Wait briefly for a live observer to claim this exact native app owner."""
     identity = _process_identity(owner_pid)
     if identity is None:
         return False
+    deadline = time.monotonic() + _DAEMON_START_SECONDS
+    child = None
     try:
-        fd = _acquire_lease()
-        if fd is None:
-            return True
-        try:
-            worker = Path(__file__).resolve().parent.parent / "atticus.py"
-            env = dict(os.environ, **{_LEASE_FD: str(fd), _OWNER_BIRTH: identity["started"]})
-            subprocess.Popen([sys.executable, str(worker), "--assistant-daemon", str(owner_pid)],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             env=env, pass_fds=(fd,), start_new_session=True)
-            return True
-        finally:
-            os.close(fd)
-    except OSError:
-        return False
+        while _identity_is_live(identity):
+            fd = _acquire_lease()
+            if fd is not None:
+                try:
+                    if child is not None or time.monotonic() >= deadline:
+                        return False
+                    worker = Path(__file__).resolve().parent.parent / "atticus.py"
+                    env = dict(os.environ, **{_LEASE_FD: str(fd), _OWNER_BIRTH: identity["started"]})
+                    child = subprocess.Popen([sys.executable, str(worker), "--assistant-daemon", str(owner_pid)],
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, env=env, pass_fds=(fd,), start_new_session=True)
+                finally:
+                    os.close(fd)
+            else:
+                lease = _read_state(_state_path() / "state.json").get("herdr", {})
+                if lease.get("owner") == identity and _identity_is_live(lease.get("daemon")):
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or (child is not None and child.poll() is not None):
+                return False
+            time.sleep(min(remaining, 0.05))
+    except (OSError, ValueError):
+        pass
+    return False
 
 
 def _daemon_lease(inherited):
@@ -270,12 +287,12 @@ def run_daemon(owner_pid: int) -> None:
     try:
         for number in (signal.SIGTERM, signal.SIGINT):
             handlers[number] = signal.signal(number, lambda *_: stop.set())
-        _publish(None, [], daemon)
+        _publish(None, [], daemon, identity)
         while not stop.is_set() and _identity_is_live(identity):
             runner.tick()
             update = stream.tick()
             if update is not None:
-                _publish(*update, daemon)
+                _publish(*update, daemon, identity)
             stop.wait(0.12)
     finally:
         try:
@@ -283,7 +300,7 @@ def run_daemon(owner_pid: int) -> None:
                 stream.close()
             finally:
                 runner.close()
-                _publish(stream.reducer, [], daemon)
+                _publish(stream.reducer, [])
         finally:
             for number, handler in handlers.items():
                 signal.signal(number, handler)
@@ -300,12 +317,13 @@ _ORDINALS = {"첫": 1, "첫째": 1, "한": 1, "두": 2, "둘째": 2, "세": 3, "
              "팔": 8, "구": 9, "십": 10, "one": 1, "two": 2, "three": 3, "four": 4,
              "first": 1, "second": 2, "third": 3, "fourth": 4}
 _PICK = re.compile(r"(?:(세션|session|테스트|test)(?:은|는)?\s+)?(?:number\s+)?"
-                   r"([0-9]{1,2}|" + "|".join(_ORDINALS) + r")\s*(?:번\s*째|번째|번|st|nd|rd|th)?"
+                   r"([0-9]{1,3}|" + "|".join(_ORDINALS) + r")\s*(?:번\s*째|번째|번|st|nd|rd|th)?"
                    r"(?:\s*(?:골라줘|선택해\s*줘|선택|으로|로))?\Z")
 _SESSION = r"(?:(?P<prefix>.+?)\s+)?(?:세션(?:들|을|이|의)?|sessions?)\s*"
 _TEST = r"(?:(?P<prefix>.+?)\s+)?(?:테스트(?:를|의)?|tests?)\s*"
 _TARGET = r"(?:(?P<suffix>.+?)\s+)?"
 _SAY = r"(?:\s*(?:알려\s*(?:줘|주세요)|말해\s*줘|확인해\s*(?:줘|주세요)|보여\s*줘))?"
+_PAGE = re.compile(r"(다음|이전)\s+(세션|테스트)\s*목록\Z")
 _PATTERNS = tuple((kind, action, re.compile(pattern + r"\Z")) for kind, action, pattern in (
     ("session", "unwatch", r"(?:(?:한|모든|세션|herdr|개발)\s+)*감시(?:를)?\s*(?:그만해|중지해|해제해|멈춰)"),
     ("session", "unwatch", r"stop (?:watching|monitoring)(?: (?:the )?(?:herdr )?sessions?)?"),
@@ -328,6 +346,9 @@ _PATTERNS = tuple((kind, action, re.compile(pattern + r"\Z")) for kind, action, 
 
 def _parse(text):
     text = _normalize(text)
+    if match := _PAGE.fullmatch(text):
+        direction, label = match.groups()
+        return "session" if label == "세션" else "test", "page", 1 if direction == "다음" else -1
     if match := _PICK.fullmatch(text):
         marker, ordinal = match.groups()
         kind = {"세션": "session", "session": "session", "테스트": "test", "test": "test"}.get(marker)
@@ -363,11 +384,25 @@ def recognizes(text: str) -> bool:
         return False
 
 
+def _choice_prompt(context):
+    labels = context.get("labels")
+    if labels is None:
+        return "목록을 다시 요청해 주세요."
+    size = len(labels)
+    start = context["page"] * _PAGE_SIZE
+    end = min(start + _PAGE_SIZE, size)
+    kind = "세션" if context["kind"] == "session" else "테스트"
+    spoken = ", ".join(f"{index + 1}번 {labels[index]}" for index in range(start, end))
+    pages = ([f"이전 {kind} 목록"] if start else []) + ([f"다음 {kind} 목록"] if end < size else [])
+    suffix = f" {'이나 '.join(pages)}도 요청할 수 있어요." if pages else ""
+    return f"어느 {kind}인가요? {spoken}. 번호를 말해 주세요.{suffix}"
+
+
 def _offer(state, kind, action, choices):
-    state["selection"] = {"kind": kind, "action": action, "ids": [key for key, _ in choices],
-                          "created": time.time()}
-    spoken = ", ".join(f"{index}번 {label}" for index, (_, label) in enumerate(choices, 1))
-    return f"어느 {'세션' if kind == 'session' else '테스트'}인가요? {spoken}. 번호를 말해 주세요."
+    context = {"kind": kind, "action": action, "ids": [key for key, _ in choices],
+               "labels": [label for _, label in choices], "page": 0, "created": time.time()}
+    state["selection"] = context
+    return _choice_prompt(context)
 
 
 def _session_name(item):
@@ -394,7 +429,7 @@ def _session_reply(state, action, target, key=None):
     if key is not None:
         rows = [row for row in rows if row["id"] == key]
     elif target:
-        rows = [row for row in rows if target in {row["address"], _normalize(row["name"]), row["agent"]}]
+        rows = [row for row in rows if target in {row["address"], _normalize(row["name"]), _normalize(_session_name(row)), row["agent"]}]
     if not rows:
         return "해당 세션의 상태를 확인할 수 없어요." if target or key is not None else "활성 개발 세션이 없어요."
     if action == "query":
@@ -402,7 +437,7 @@ def _session_reply(state, action, target, key=None):
         suffix = f" 외 {len(rows) - 8}개" if len(rows) > 8 else ""
         return f"{description}{suffix}."
     if len(rows) > 1:
-        return _offer(state, "session", action, [(row["id"], _session_name(row)) for row in rows[:8]])
+        return _offer(state, "session", action, [(row["id"], _session_name(row)) for row in rows])
     row = rows[0]
     state["selected_session"] = row["id"]
     if action == "result":
@@ -410,7 +445,8 @@ def _session_reply(state, action, target, key=None):
     watches = state.setdefault("watches", {})
     if row["id"] not in watches and len(watches) >= _MAX_WATCHES:
         return "세션 감시 목록이 가득 찼어요. 기존 감시를 중지한 뒤 다시 요청해 주세요."
-    watches.setdefault(row["id"], {"last_notified_turn": row["turn"] if row["turn"] is not None else -1})
+    watermark = row.get("watch_watermark", row["turn"])
+    watches.setdefault(row["id"], {"last_notified_turn": watermark if watermark is not None else -1})
     return f'{_session_name(row)} 세션의 다음 작업이 끝나면 알려드릴게요.' if row["state"] == "done" else (
         f'{_session_name(row)} 세션의 작업이 끝나면 알려드릴게요.')
 
@@ -423,11 +459,17 @@ def handle(text: str) -> str | None:
     from .test_runs import test_reply
 
     kind, action, target = parsed
-    if action == "decline":
-        return "알겠어요."
     try:
         with _state(write=action != "query") as state:
             key = None
+            if action == "page":
+                context = _pending(state)
+                if not context or context["kind"] != kind:
+                    return "선택 목록이 없어요. 먼저 감시나 테스트 실행을 요청해 주세요."
+                last_page = (len(context["ids"]) - 1) // _PAGE_SIZE
+                context["page"] = max(0, min(last_page, context.get("page", 0) + target))
+                context["created"] = time.time()
+                return _choice_prompt(context)
             if action == "pick":
                 context = _pending(state)
                 if not context or (kind and context["kind"] != kind):
@@ -439,6 +481,8 @@ def handle(text: str) -> str | None:
                 state.pop("selection", None)
             elif action != "query" and state.get("selection", {}).get("kind") == kind:
                 state.pop("selection", None)
+            if action == "decline":
+                return "알겠어요."
             reply = _session_reply if kind == "session" else test_reply
             return reply(state, action, target, key)
     except (OSError, ValueError):

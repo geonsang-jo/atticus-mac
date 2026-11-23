@@ -76,6 +76,11 @@ class SessionReducer:
         return [dict(item) if self.connected else {**item, "state": "unknown", "turn": None}
                 for item in self._sessions.values()]
 
+    def watch_watermark(self, session):
+        # The turn can advance before the status changes. A new watch may
+        # still observe the end of that pending working turn.
+        return self._working_since.get(session["address"], session["turn"])
+
     def disconnect(self):
         self._seq = None
         self._working_since.clear()

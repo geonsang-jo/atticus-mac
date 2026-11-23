@@ -117,3 +117,11 @@ class TestTrackerTests(unittest.TestCase):
         self.runner.close()
         row = self.state()["runs"][-1]
         self.assertEqual((row["status"], row["exit_code"]), ("passed", 0))
+
+    def test_negation_clears_pending_selection_atomically(self):
+        for name in ("one", "two"):
+            test_runs.register_test(name, self.directory, [sys.executable, "-c", "pass"])
+        self.assertIn("2번", monitor.handle("테스트 실행해"))
+        self.assertIsNotNone(monitor.handle("테스트 실행하지 마"))
+        self.assertIsNone(monitor.handle("2번"))
+        self.assertEqual(self.state().get("runs", []), [])
