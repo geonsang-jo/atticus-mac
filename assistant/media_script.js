@@ -25,11 +25,19 @@ function safeTitle(title) {
 
 async function observe(page, target, op, value) {
     return page.evaluate(async ({target, op, value}) => {
+        const path = new URL(target.url).pathname;
+        const shortsPage = path.startsWith("/shorts/");
+        const embedPage = path.startsWith("/embed/");
+
         function activeVideo() {
             const selector = ".html5-video-player video.html5-main-video";
             const players = [...document.querySelectorAll(selector)].filter(video => {
-                const reel = video.closest("ytd-reel-video-renderer");
-                return reel === null || reel.hasAttribute("is-active");
+                const {width, height} = video.getBoundingClientRect();
+                if (!width || !height || video.closest("#inline-preview-player") ||
+                    video.checkVisibility?.({visibilityProperty: true}) === false) return false;
+                if (shortsPage) return video.closest("ytd-reel-video-renderer[is-active]");
+                return video.closest("#movie_player") &&
+                    (embedPage || video.closest("ytd-watch-flexy, ytm-watch"));
             });
             return players.length === 1 ? players[0] : null;
         }

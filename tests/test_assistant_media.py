@@ -345,10 +345,13 @@ class MediaScriptTests(unittest.TestCase):
         const location = globalThis.location = {href: original};
         let calls = 0;
         let currentTime = 20;
+        const shortsPage = new URL(original).pathname.startsWith("/shorts/");
         const player = {getVideoData: () => ({
             video_id: (
                 ["missingID", "domID"].includes(fixture) || (fixture === "losesID" && calls)
-            ) ? undefined : new URL(location.href).searchParams.get("v")
+            ) ? undefined : (
+                new URL(location.href).searchParams.get("v") ?? new URL(location.href).pathname.split("/").at(-1)
+            )
         })};
         const video = {
             paused: false, muted: false, volume: 0.5, duration: 200,
@@ -366,10 +369,15 @@ class MediaScriptTests(unittest.TestCase):
                 });
             },
             removeEventListener() {},
+            getBoundingClientRect: () => ({width: 1132, height: 637}),
             closest: (selector) => {
                 if (selector === ".html5-video-player") return player;
+                if (selector === "#movie_player" && !shortsPage) return player;
+                if (selector === "ytd-watch-flexy, ytm-watch" && !shortsPage) return {};
                 if (fixture === "domID" && selector.includes("[video-id]"))
                     return {getAttribute: () => request.target.videoId};
+                if (shortsPage && selector.startsWith("ytd-reel-video-renderer"))
+                    return {hasAttribute: () => true};
                 return null;
             },
             pause: () => {
@@ -378,10 +386,32 @@ class MediaScriptTests(unittest.TestCase):
                 video.paused = true;
             },
         };
+        function extraVideo(id, videoId, width, inReel = false) {
+            const player = {getVideoData: () => ({video_id: videoId})};
+            return {
+                ...video,
+                getBoundingClientRect: () => ({width, height: width}),
+                closest: (selector) => {
+                    if (selector === ".html5-video-player" || selector === "#" + id) return player;
+                    if (selector === "ytd-watch-flexy, ytm-watch" && id === "movie_player") return {};
+                    if (inReel && selector.startsWith("ytd-reel-video-renderer"))
+                        return {hasAttribute: () => true};
+                    return null;
+                },
+                pause: () => { throw new Error("unexpected mutation on a non-target video"); },
+            };
+        }
+        const videos = fixture === "noPlayer" ? [] : [video];
+        if (fixture === "watchPreviews") {
+            videos.push(extraVideo("shorts-player", "AAAAAAAAAAA", 0));
+            videos.push(extraVideo("inline-preview-player", request.target.videoId, 0));
+        }
+        if (fixture === "twoMainPlayers") videos.push(extraVideo("movie_player", request.target.videoId, 400));
+        if (fixture === "hiddenShort") videos.push(extraVideo("shorts-player", "AAAAAAAAAAA", 0, true));
         globalThis.document = {
             title: "Fixture - YouTube",
             querySelector: () => null,
-            querySelectorAll: (selector) => fixture === "noPlayer" ? [] : [video],
+            querySelectorAll: () => videos,
         };
         const listBrowserTabs = async () => [{
             targetId: request.target.targetId, url: location.href, title: document.title,
@@ -399,9 +429,9 @@ class MediaScriptTests(unittest.TestCase):
             .then(() => console.log(JSON.stringify({calls})));
     """
 
-    def run_script(self, fixture, op="pause", **params):
+    def run_script(self, fixture, op="pause", source=FIRST, **params):
         self.assertTrue(SCRIPT.is_file(), "The Aside action script is missing")
-        request = {"op": op, "target": {key: FIRST[key] for key in ("targetId", "url", "videoId")}, **params}
+        request = {"op": op, "target": {key: source[key] for key in ("targetId", "url", "videoId")}, **params}
         process = subprocess.run(
             ["node", "-e", self.HARNESS, json.dumps(request), fixture, str(SCRIPT)],
             capture_output=True, check=True, text=True, timeout=3,
@@ -414,6 +444,25 @@ class MediaScriptTests(unittest.TestCase):
         self.assertTrue(receipt["ok"])
         self.assertIs(receipt["before"]["paused"], False)
         self.assertIs(receipt["after"]["paused"], True)
+        self.assertEqual(calls, 1)
+
+    def test_static_script_chooses_watch_player_over_hidden_shorts_and_preview(self):
+        receipt, calls = self.run_script("watchPreviews")
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["after"]["videoId"], FIRST["videoId"])
+        self.assertTrue(receipt["after"]["paused"])
+        self.assertEqual(calls, 1)
+
+    def test_static_script_refuses_two_visible_main_players(self):
+        receipt, calls = self.run_script("twoMainPlayers")
+        self.assertFalse(receipt["ok"])
+        self.assertEqual(receipt["error"], "unloaded")
+        self.assertEqual(calls, 0)
+
+    def test_static_script_chooses_only_visible_active_short(self):
+        receipt, calls = self.run_script("hiddenShort", source=SECOND)
+        self.assertTrue(receipt["ok"])
+        self.assertEqual(receipt["after"]["videoId"], SECOND["videoId"])
         self.assertEqual(calls, 1)
 
     def test_static_script_does_not_touch_wrong_video_or_unloaded_player(self):
