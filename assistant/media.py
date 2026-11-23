@@ -30,6 +30,7 @@ _MAX_STATE_SIZE = 262_144
 _PAGE_MOVES = {"다음 목록": 1, "이전 목록": -1}
 _UNVERIFIED = "Aside에서 유튜브 동작을 확인할 수 없어요."
 _PLAYER_UNAVAILABLE = "유튜브 플레이어 상태를 확인할 수 없어요."
+_REJECTED = "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
 _CAPABILITIES = "유튜브 열기와 검색, 열린 영상의 재생·정지, 소리와 시간 조절, 제목 확인을 지원해요."
 
 
@@ -113,6 +114,12 @@ _NUMERALS = {
     "서른": 30, "마흔": 40, "쉰": 50, "예순": 60, "일흔": 70, "여든": 80, "아흔": 90,
 }
 _SINO_DIGITS = "일이삼사오육칠팔구"
+_ORDINAL = r"([0-9]{1,4}|[가-힣]{1,4})\s*번(?:째)?"
+_SELECTION_SCOPE = re.compile(rf"^{_YOUTUBE}(?:에서|의)?(?:\s+|(?=[0-9]))", re.IGNORECASE)
+_TAB_FOLLOW_UP = re.compile(
+    rf"{_ORDINAL}(?:\s+{_ORDINAL}(?=\s+탭))?"
+    r"(?:\s+(탭)(?:을|에서|의)?)?(?:\s+(.+))?",
+)
 
 
 def _clean(text: str) -> str:
@@ -237,33 +244,48 @@ def _title(video):
 
 
 def _selection_request(text, choices):
-    """Resolve pagination or a selection within the current prompt."""
-    text = re.sub(rf"^{_YOUTUBE}(?:에서|의)?\s+", "", _clean(text), flags=re.IGNORECASE)
+    """Resolve a page or match indices with an optional new player command."""
+    text = _SELECTION_SCOPE.sub("", _clean(text), count=1)
     if text in _PAGE_MOVES:
         return text
-    choice = re.fullmatch(
-        r"([0-9]{1,4}|[가-힣]{1,4})\s*(?:번(?:째)?|번째)(?:\s*(?:선택|으로|영상))?"
-        rf"{_DO}", text,
-    )
-    if choice:
-        number = _spoken_number(choice[1])
+
+    def indices(number):
+        return [number - 1] if 1 <= number <= len(choices) else []
+
+    pure = re.fullmatch(rf"{_ORDINAL}(?:\s*탭(?:을)?)?(?:\s*(?:선택|으로|영상))?{_DO}", text)
+    if pure:
+        number = _spoken_number(pure[1])
         if number is not None:
-            return [number - 1] if 1 <= number <= len(choices) else []
+            return indices(number), None
     if text in {"첫째", "둘째", "셋째", "넷째"}:
-        number = _NUMERALS[text]
-        return [number - 1] if number <= len(choices) else []
+        return indices(_NUMERALS[text]), None
+
+    tab_request = _TAB_FOLLOW_UP.fullmatch(text)
+    if tab_request:
+        original, repeated, tab, operation = tab_request.groups()
+        number = _spoken_number(original)
+        if number is not None:
+            if repeated and number != _spoken_number(repeated):
+                return [], Command(Action.REJECT)
+            if operation is None:
+                return indices(number), None
+            command = parse_command(operation)
+            if command and command.action in _PLAYER_ACTIONS:
+                return indices(number), command
+            if tab or _MEDIA_CONTEXT.search(operation):
+                return [], Command(Action.REJECT)
 
     explicit = re.fullmatch(rf"(.+?)\s*선택{_DO}", text)
     name = _clean(explicit[1] if explicit else text).casefold()
     keys = [_clean(_title(video)).casefold() for video in choices]
     exact = [index for index, key in enumerate(keys) if name == key]
     if exact:
-        return exact
+        return exact, None
     if explicit and len(name) >= 2:
         partial = [index for index, key in enumerate(keys) if name in key]
-        return partial or None
+        if partial:
+            return partial, None
     return None
-
 
 def _saved_command(value):
     if not isinstance(value, dict):
@@ -423,14 +445,24 @@ class AsideMedia:
             state["pending"]["page"] = page
             _write_json(self.state_path, state)
             return _prompt(choices, page)
-        if len(selection) != 1:
+        indices, override = selection
+        if override is not None:
+            # The new action supersedes the spoken prompt even if its tab cannot be used.
+            state.pop("pending")
+            _write_json(self.state_path, state)
+            if override.action == Action.REJECT:
+                return _REJECTED
+            if len(indices) != 1:
+                return "탭 번호를 확인할 수 없어요. 유튜브 요청을 다시 말해 주세요."
+            command = override
+        if len(indices) != 1:
             return _prompt(choices, page)
 
         videos = self._videos()
         if videos is None:
             return _UNVERIFIED
-        target = _identity(choices[selection[0]])
-        state.pop("pending")
+        target = _identity(choices[indices[0]])
+        state.pop("pending", None)
         video = next((video for video in videos if _identity(video) == target), None)
         if video is None:
             _write_json(self.state_path, state)
@@ -471,7 +503,7 @@ class AsideMedia:
             state.pop("pending")
             _write_json(self.state_path, state)
         if command.action == Action.REJECT:
-            return "유튜브 동작을 실행하지 않았어요. 원하는 동작 하나를 말해 주세요."
+            return _REJECTED
         if command.action == Action.INVALID:
             return str(command.value)
         if command.action in {Action.OPEN, Action.SEARCH}:

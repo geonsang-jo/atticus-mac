@@ -265,6 +265,54 @@ class MediaAdapterTests(unittest.TestCase):
         )
         self.assertIn("오케스트라 합주", adapter.handle("지금 뭐 틀어져 있어?"))
 
+    def test_follow_up_accepts_repeated_ordinal_tab_and_playback_command(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        self.assertIn("1번", adapter.handle("계속 재생해"))
+        adapter, transport = self.adapter(listed(SECOND, FIRST), changed("play", FIRST, paused=False))
+        text = "첫 번 첫 번째 탭 유튜브를 재생해줘."
+        self.assertTrue(adapter.recognizes(text))
+        self.assertEqual(adapter.handle(text), "영상을 재생했어요.")
+        self.assertEqual([request["op"] for request in transport.requests], ["list", "play"])
+        self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_follow_up_tab_command_uses_its_explicit_operation(self):
+        for text in ("유튜브 첫 번째 탭 멈춰 줘", "첫 번째 탭 일시 정지해줘", "유튜브1번 탭 멈춰"):
+            with self.subTest(text=text):
+                self.state.unlink(missing_ok=True)
+                adapter, _ = self.adapter(listed(FIRST, SECOND))
+                self.assertIn("1번", adapter.handle("계속 재생해"))
+                playing = {**FIRST, "paused": False}
+                adapter, transport = self.adapter(listed(SECOND, playing), changed("pause", playing, paused=True))
+                self.assertTrue(adapter.recognizes(text))
+                self.assertEqual(adapter.handle(text), "영상을 일시 정지했어요.")
+                self.assertEqual([request["op"] for request in transport.requests], ["list", "pause"])
+                self.assertEqual(transport.requests[-1]["target"]["targetId"], FIRST["targetId"])
+
+    def test_follow_up_unsafe_or_invalid_tab_command_never_reuses_pending_action(self):
+        for text in (
+            "첫 번 두 번째 탭 유튜브를 재생해줘",
+            "첫 번째 탭 멈춰 그리고 재생해",
+            "첫 번째 탭 유튜브를 재생하지 마",
+            "첫 번째 탭 유튜브에서 재즈 검색해",
+            "9번 탭 멈춰",
+        ):
+            with self.subTest(text=text):
+                adapter, _ = self.adapter(listed(FIRST, SECOND))
+                self.assertIn("1번", adapter.handle("계속 재생해"))
+                adapter, transport = self.adapter()
+                self.assertTrue(adapter.recognizes(text))
+                self.assertIsNotNone(adapter.handle(text))
+                self.assertFalse(adapter.recognizes("1번"))
+                self.assertEqual(transport.requests, [])
+
+    def test_follow_up_failed_browser_query_clears_superseded_action(self):
+        adapter, _ = self.adapter(listed(FIRST, SECOND))
+        adapter.handle("계속 재생해")
+        adapter, transport = self.adapter("<unavailable>")
+        self.assertIn("확인할 수", adapter.handle("첫 번째 탭 멈춰"))
+        self.assertFalse(adapter.recognizes("1번"))
+        self.assertEqual([request["op"] for request in transport.requests], ["list"])
+
     def test_paginated_spoken_selection_keeps_original_order_across_workers(self):
         videos = [{
             **FIRST, "targetId": f"tab-{index}", "videoId": f"{index:011}",
