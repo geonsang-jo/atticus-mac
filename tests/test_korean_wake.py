@@ -56,24 +56,107 @@ console.log(ready('perms')); last.speech=false; console.log(ready('perms'));
         result = subprocess.run(["node", "-e", fixture], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.splitlines(), ["true", "false"])
 
+    def test_begin_uses_native_mode_before_any_permission_or_provider_callback(self):
+        html = (ROOT / "ui/onboarding.html").read_text()
+        initial = next(line for line in html.splitlines() if "let practice = null" in line)
+        click = next(line for line in html.splitlines() if "$('start').onclick" in line)
+        script = """
+function firstClick(mode) {
+  const window = {atticusBuiltin:mode}, button = {}, $ = () => button, go = id => id;
+""" + initial + click + """
+  return button.onclick();
+}
+console.log(firstClick(true), firstClick(false));"""
+        result = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=True)
+        self.assertEqual(result.stdout.strip(), "perms ai")
+        setup = SWIFT.split('final class Onboarding:', 1)[1].split('    func push()', 1)[0]
+        self.assertRegex(setup, r'window\.atticusBuiltin.*?injectionTime: \.atDocumentStart')
+
+    def test_engine_start_and_result_failures_end_current_capture_and_rearm(self):
+        methods = SWIFT[SWIFT.index("    func beginSpeechSegment("):SWIFT.index("    func speechPiece(")]
+        harness = """import Foundation
+struct AnalyzerInput {}
+class AnalysisContext {
+    enum Hint { case general }
+    var contextualStrings: [Hint:[String]] = [:]
+}
+struct Piece { var text = AttributedString(""); var isFinal = false }
+protocol SpeechModule {}
+var failStart = false, failResults = false
+class SpeechTranscriber: SpeechModule {
+    var results: AsyncThrowingStream<Piece, Error> {
+        AsyncThrowingStream { continuation in
+            if failResults { continuation.finish(throwing: NSError(domain:"fixture-results",code:2)) }
+            else { continuation.finish() }
+        }
+    }
+}
+class DictationTranscriber: SpeechTranscriber {}
+class SpeechAnalyzer {
+    init(modules: [any SpeechModule]) {}
+    func setContext(_ c: AnalysisContext) async throws {}
+    func start(inputSequence: AsyncStream<AnalyzerInput>) async throws {
+        if failStart { throw NSError(domain:"fixture-start", code:1) }
+    }
+}
+class SpeechInputs { func add(_ feed: AsyncStream<AnalyzerInput>.Continuation) -> UUID { UUID() } }
+class Engine { var isRunning = true }
+class Trace { func mark(_ s:String) {} }
+class App {
+    var engine = Engine(), speechInputs: SpeechInputs? = SpeechInputs(), speechTrace: Trace?
+    var listenID = 1, speechSegment = 0, activeSpeechSegment = 0, nextSpeechSegment = 0
+    var speechText: [Int: (base: String, done: String, live: String)] = [:]
+    var hints: [String] = [], dictating = false, speechFailed = false, handsFree = true
+    var offerText: String?, releasePending = false, busy = false, proc: Process?
+    var speechFormat: Int? = 1, messages: [String] = [], rearmed = 0
+    func speechModule(dictate: Bool) -> any SpeechModule { SpeechTranscriber() }
+    func speechPiece(_ s:String, final:Bool, segment:Int, listeningID:Int) {}
+    func hush() { engine.isRunning = false; listenID += 1 }
+    func stopOfferInput() { hush() }
+    func js(_ name: String, _ message: String) { messages.append(message) }
+    func hide(after: Double) {}
+    func wakeTick() { if !engine.isRunning { rearmed += 1 } }
+    func prepareSpeech() {}
+""" + methods + """
+}
+func roundTrip(start: Bool, result: Bool, stale: Bool) {
+    failStart = start; failResults = result
+    let app = App()
+    let segment = app.beginSpeechSegment("", listeningID: app.listenID)
+    app.activeSpeechSegment = segment.segment
+    if stale { app.listenID += 1 }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+    print(app.engine.isRunning, app.messages.count, app.rearmed,
+          app.messages.contains { $0.contains("fixture-") })
+}
+roundTrip(start:true,result:false,stale:false)
+roundTrip(start:false,result:true,stale:false)
+roundTrip(start:true,result:true,stale:false)
+roundTrip(start:true,result:true,stale:true)
+"""
+        self.assertEqual(swift_output(self, harness), ["false 1 1 true"] * 3 + ["true 0 0 false"])
+
     def test_chime_follows_open_command_microphone(self):
         start = SWIFT.split("    func start(dictate: Bool, quiet: Bool = false)", 1)[1].split("    func heard(", 1)[0]
         self.assertLess(start.index("engine.start(device"), start.index('cue("soundStart")'))
         self.assertLess(start.index("if case .failure(let error) = result"), start.index('cue("soundStart")'))
 
     def test_wake_loop_rearms_after_answer_and_consumes_each_match_once(self):
-        wake = SWIFT[SWIFT.index("    let wakeMic = Mic()"):SWIFT.index("    func enableWakeWord(")]
+        wake = SWIFT[SWIFT.index("    let wakeMic = Mic()"):SWIFT.index("    // Whisper: the mic fills")]
         harness = """import Foundation
 enum Prefs {
+    static var enabled = true
+    static func set(_ k: String, _ v: Bool) { enabled = v }
     static func str(_ key: String) -> String { key == "wakeWordName" ? "헤이 아티" : "ko-KR" }
-    static func bool(_ key: String) -> Bool { key == "wakeWord" }
+    static func bool(_ key: String) -> Bool { key == "wakeWord" && enabled }
 }
-enum Access { case authorized }
+enum Access { case authorized, denied }
+var granted = true
 enum Media { case audio }
 final class AVCaptureDevice {
     let uniqueID: String, localizedName = "fixture"
     init?(uniqueID: String) { self.uniqueID = uniqueID }
-    static func authorizationStatus(for: Media) -> Access { .authorized }
+    static func authorizationStatus(for: Media) -> Access { granted ? .authorized : .denied }
     static func `default`(for: Media) -> AVCaptureDevice? { AVCaptureDevice(uniqueID:"fixture") }
 }
 var selectedID = "fixture"
@@ -96,7 +179,7 @@ class SFSpeechRecognizer {
     static var languages: [String] = []
     let locale: Locale
     init?(locale: Locale) { self.locale = locale; Self.languages.append(locale.identifier) }
-    static func authorizationStatus() -> Access { .authorized }
+    static func authorizationStatus() -> Access { granted ? .authorized : .denied }
     let isAvailable = true, supportsOnDeviceRecognition = true
     func recognitionTask(with: SFSpeechAudioBufferRecognitionRequest, resultHandler: @escaping (Words?, Error?) -> Void) -> SFSpeechRecognitionTask {
         Self.callbacks.append(resultHandler); return SFSpeechRecognitionTask()
@@ -105,9 +188,12 @@ class SFSpeechRecognizer {
 class Flag { var isRunning = false, isPlaying = false }
 struct Meeting { var running = false }
 var meeting = Meeting()
-struct Onboarding { var win: Int?; var wakeTrial = false, setupClosed = false }
+struct Onboarding {
+    var win: Int?; var wakeTrial = false, setupClosed = false
+    func request(_ need:String, settingsOnRefusal:Bool, current:()->Bool, done:(Bool)->Void) { if current() { done(granted) } }
+}
 var onboarding = Onboarding()
-struct Settings { func send(_ s: String, _ v: Any) {} }
+struct Settings { func push() {}; func send(_ s: String, _ v: Any) {} }
 enum Atticus { static let settings = Settings() }
 struct Drawing { var voice: Flag?, active = true; mutating func clear() { active = false } }
 struct Panel { var isVisible = true }
@@ -116,7 +202,10 @@ final class App {
     var handsFree = false, wakeSleeping = false, wakeInactive = false, wakeLocked = false
     var releasePending = false, voicePermissionPending = false, retryOffer = false, askFile = ""
     var panel = Panel(), engine = Flag(), voice: Flag?, drawing = Drawing(), cueSound: Flag?, cueEnds = Date.distantPast
-    var clickTalk = false, captures = 0, cancelled = 0
+    var clickTalk = false, captures = 0, cancelled = 0, pinned = false, voicePermissionID = 0
+    var voicePermissionAction: (() -> Void)?
+    func js(_ name: String, _ value: String?) {}
+    func missingVoicePermission(_ need: String, retry: @escaping () -> Void) { voicePermissionAction = retry; voicePermissionPending = true }
     func start(dictate: Bool, quiet: Bool) { captures += 1; engine.isRunning = true }
     func hush() { busy = false; retryOffer = false; cancelled += 1 }
 """ + wake + """
@@ -155,11 +244,16 @@ if let old = SFSpeechRecognizer.callbacks.first {
     print("failed", app.wakeRequest == nil, app.wakeRetry > Date(), app.captures)
     app.wakeRetry = .distantPast; app.wakeTick()
     print("recovered", app.wakeRequest != nil)
+    app.stopWake(); granted = false; app.enableWakeWord(); cycle()
+    print("denied", Prefs.enabled, app.wakeRequest == nil)
+    granted = true; app.wakeTick()
+    print("later-grant", app.wakeRequest != nil, app.voicePermissionPending)
 }
 """
         self.assertEqual(swift_output(self, harness), ["armed 1 cancelled 0", "ambient 0 0",
                          "wake 1 1 false", "rearmed 2 1", "speaking true 1", "sleep true 1", "resumed true true",
-                         "screen-locked true 1", "device usb-mic 1", "failed true true 1", "recovered true"])
+                         "screen-locked true 1", "device usb-mic 1", "failed true true 1", "recovered true",
+                         "denied true true", "later-grant true false"])
 
 
 if __name__ == "__main__":

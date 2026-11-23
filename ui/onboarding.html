@@ -484,7 +484,8 @@
   const post = m => window.webkit?.messageHandlers.ob.postMessage(m);
   const pages = ['welcome', 'ai', 'model', 'perms', 'try', 'dictate', 'show', 'improve', 'tip', 'done'];
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
-  let practice = null, builtin = false;
+  let practice = null, builtin = window.atticusBuiltin === true;
+  if (builtin) $('access-description').textContent = '호출어와 음성 요청에 사용할 마이크와 음성 인식 권한을 허용하세요.';
   let cur = '', orbWake = null, ahead = 0, arrivedReady = false, askedLocal = false, ideaTimer = 0, ideaAt = 0;
   let planOK = false, planKnown = false, last = null, toggleMode = false, talkLabel = '⌃⌥Space', tried = false, doneNext = 'Start Using Atticus';
   const ready = id => id === 'perms' ? !!last && (builtin ? last.mic && last.speech : P.every(([k]) => last[k])) : id === 'ai' ? planOK : false;

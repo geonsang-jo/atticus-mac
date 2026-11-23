@@ -3032,6 +3032,7 @@ final class App: NSObject, WKScriptMessageHandler {
     var wakeTask: SFSpeechRecognitionTask?, wakeRequest: SFSpeechAudioBufferRecognitionRequest?
     var wakeID = 0, wakeRetry = Date.distantPast, wakeBegan = Date.distantPast, wakeDevice = ""
     var wakeBackoff = 1.0, wakePermissionID = 0
+    var wakePermissionNoticeID: Int?
     var wakeStatus = "호출어 준비 중" {
         didSet {
             guard wakeStatus != oldValue else { return }
@@ -3083,6 +3084,13 @@ final class App: NSObject, WKScriptMessageHandler {
         clickTalk = true; start(dictate: false, quiet: quiet); if !engine.isRunning { clickTalk = false }
     }
     func wakeTick() {
+        if let notice = wakePermissionNoticeID, notice != voicePermissionID || !Prefs.bool("wakeWord") ||
+            (AVCaptureDevice.authorizationStatus(for: .audio) == .authorized && SFSpeechRecognizer.authorizationStatus() == .authorized) {
+            wakePermissionNoticeID = nil
+            if notice == voicePermissionID {
+                voicePermissionAction = nil; voicePermissionPending = false; pinned = false; js("permission", nil)
+            }
+        }
         if let blocker = wakeBlocker {
             if wakeRequest != nil { stopWake() }
             wakeStatus = blocker
@@ -3141,11 +3149,8 @@ final class App: NSObject, WKScriptMessageHandler {
             let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
             let speech = SFSpeechRecognizer.authorizationStatus() == .authorized
             if !mic || !speech {
-                Prefs.set("wakeWord", false)
-                missingVoicePermission(mic ? "speech" : "microphone") { [weak self] in
-                    Prefs.set("wakeWord", true); self?.enableWakeWord(settings: true)
-                }
-
+                wakePermissionNoticeID = voicePermissionID
+                missingVoicePermission(mic ? "speech" : "microphone") { [weak self] in self?.enableWakeWord(settings: true) }
             }
             if mic && speech { js("permission", nil); voicePermissionAction = nil; voicePermissionPending = false; pinned = false }
             Atticus.settings.push(); wakeTick()
@@ -4273,9 +4278,14 @@ final class App: NSObject, WKScriptMessageHandler {
         speechSegment += 1; let segment = speechSegment
         speechText[segment] = (base, "", "")
         let inputID = speechInputs!.add(cont)
-        Task {
-            let ctx = AnalysisContext(); ctx.contextualStrings[.general] = hints
-            try? await an.setContext(ctx); try? await an.start(inputSequence: stream)
+        Task { [weak self] in
+            let ctx = AnalysisContext(); ctx.contextualStrings[.general] = self?.hints ?? []
+            try? await an.setContext(ctx)
+            do { try await an.start(inputSequence: stream) }
+            catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.speechSegmentFailed(error, segment: segment, listeningID: listeningID) }
+            }
         }
         let rd = Task { [weak self] in
             do {
@@ -4292,12 +4302,22 @@ final class App: NSObject, WKScriptMessageHandler {
                     if let self, self.listenID == listeningID, self.activeSpeechSegment == segment, !self.engine.isRunning { self.speechTrace?.mark("final_text") }
                 }
             } catch {
-                await MainActor.run {
-                    if self?.listenID == listeningID && (self?.activeSpeechSegment == segment || self?.nextSpeechSegment == segment) { self?.speechFailed = true }
-                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.speechSegmentFailed(error, segment: segment, listeningID: listeningID) }
             }
         }
         return (cont, inputID, an, rd, segment)
+    }
+
+    func speechSegmentFailed(_ error: Error, segment: Int, listeningID: Int) {
+        guard listenID == listeningID, segment == activeSpeechSegment || segment == nextSpeechSegment else { return }
+        // Teardown invalidates this listen before either task can report the same failure again.
+        speechFailed = true; handsFree = false
+        if offerText != nil {
+            stopOfferInput(); releasePending = false; busy = proc?.isRunning == true
+        } else { hush() }
+        js("msg", "요청 음성 인식 오류 · " + error.localizedDescription); hide(after: 6)
+        prepareSpeech(); wakeTick()
     }
 
     func speechPiece(_ piece: String, final: Bool, segment: Int, listeningID: Int) {
@@ -5879,6 +5899,7 @@ final class Onboarding: NSObject, WKScriptMessageHandler, NSWindowDelegate {
         bg.material = .underWindowBackground; bg.blendingMode = .behindWindow; bg.state = .active
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(self, name: "ob")
+        cfg.userContentController.addUserScript(WKUserScript(source: "window.atticusBuiltin = \(Prefs.bool("assistantMode"))", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         if let arrow = arrowCursorScript() { cfg.userContentController.addUserScript(arrow) }
         if let start = UserDefaults.standard.string(forKey: "setupPage") ?? (automatic ? "ai" : nil), start.allSatisfy(\.isLetter) {
             cfg.userContentController.addUserScript(WKUserScript(source: "window.obStart = '\(start)'", injectionTime: .atDocumentStart, forMainFrameOnly: true))
