@@ -262,7 +262,10 @@ def ensure_daemon(owner_pid: int) -> bool:
                     if child is not None or time.monotonic() >= deadline:
                         return False
                     worker = Path(__file__).resolve().parent.parent / "atticus.py"
-                    env = dict(os.environ, **{_LEASE_FD: str(fd), _OWNER_BIRTH: identity["started"]})
+                    # The direct Python launch bypasses atticus.py's shell
+                    # wrapper, which normally caches outside the signed app.
+                    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                               **{_LEASE_FD: str(fd), _OWNER_BIRTH: identity["started"]})
                     child = subprocess.Popen([sys.executable, str(worker), "--assistant-daemon", str(owner_pid)],
                                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                              stderr=subprocess.DEVNULL, env=env, pass_fds=(fd,), start_new_session=True)

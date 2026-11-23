@@ -191,3 +191,11 @@ else:
                 monitor.ack_notifications(invalid)
         self.assertEqual(monitor.ack_notifications([]), 0)
         self.assertEqual([notice["id"] for notice in monitor.peek_notifications()], ["test:fixture"])
+
+    def test_daemon_launch_disables_bytecode_in_the_worker_bundle(self):
+        with patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": ""}), \
+                patch.object(monitor.subprocess, "Popen") as spawn:
+            monitor.ensure_daemon(os.getpid())
+            self.assertEqual(os.environ["PYTHONDONTWRITEBYTECODE"], "")
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"], "1")
