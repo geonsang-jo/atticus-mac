@@ -1,4 +1,5 @@
 """Exercise the app's wake loop without opening an audio device or asking for TCC."""
+import os
 import subprocess
 import tempfile
 import unittest
@@ -37,13 +38,32 @@ print(Matcher.hasWakeWord("헤이 아티", word: "헤이아티"))
 
     def test_fresh_fork_has_independent_speech_and_wake_languages(self):
         defaults = SWIFT.split("static let defaults: [String: Any] =", 1)[1].split("static let retiredKeys", 1)[0]
-        for key, value in [("wakeWord", "true"), ("wakeWordName", '"헤이 아티"'),
+        for key, value in [("wakeWord", "true"), ("wakeWordName", '"컴퓨터야"'),
                            ("wakeLanguage", '"ko-KR"'), ("speechLanguage", '"ko-KR"')]:
             self.assertIn(f'"{key}": {value}', defaults)
         ui = (ROOT / "ui/settings.html").read_text()
         for key in ["wakeLanguage", "speechLanguage"]:
             self.assertIn(f'data-k="{key}"', ui)
         self.assertIn('value="en-US"', ui)
+
+    def test_prior_default_migrates_once_and_custom_phrases_survive(self):
+        merge = SWIFT.split("        var values = defaults.merging", 1)[1].split('        if saved["support"]', 1)[0]
+        native = """
+import Foundation
+let defaults:[String:Any] = ["wakeWordName":"컴퓨터야","wakePhraseVersion":1,"wakeLanguage":"ko-KR"]
+func phrase(_ saved:[String:Any])->String {
+        var values = defaults.merging""" + merge + """
+        return values["wakeWordName"] as! String
+}
+for saved:[String:Any] in [
+    ["wakeLanguage":"ko-KR","wakeWordName":"헤이 아티"],
+    ["wakePhraseVersion":1,"wakeLanguage":"ko-KR","wakeWordName":"헤이 아티"],
+    ["wakeLanguage":"ko-KR","wakeWordName":"비서야"],
+    ["wakeLanguage":"en-US","wakeWordName":"Atticus"]] {
+    print(phrase(saved))
+}
+"""
+        self.assertEqual(swift_output(self, native), ["컴퓨터야", "헤이 아티", "비서야", "Atticus"])
 
     def test_onboarding_voice_permissions_suffice_without_ai_or_screen_access(self):
         html = (ROOT / "ui/onboarding.html").read_text()
@@ -199,6 +219,32 @@ print("legacy", legacy.fast, legacy.speculative)
         self.assertLess(start.index("engine.start(device"), start.index('cue("soundStart")'))
         self.assertLess(start.index("if case .failure(let error) = result"), start.index('cue("soundStart")'))
 
+    def test_wake_uses_independent_on_device_transcriber(self):
+        self.assertIn("final class WakeSpeech", SWIFT)
+        engine = SWIFT.split("final class WakeSpeech", 1)[1].split("final class App:", 1)[0]
+        self.assertIn("SpeechTranscriber(", engine)
+        self.assertIn("prepareToAnalyze(in:", engine)
+        self.assertIn("start(inputSequence:", engine)
+        self.assertNotIn("SFSpeechRecognizer(", engine)
+        self.assertNotIn("SFSpeechAudioBufferRecognitionRequest", SWIFT)
+
+    @unittest.skipUnless(os.environ.get("ATTICUS_TEST_OFFLINE_WAKE") == "1",
+                         "opt-in check using the installed Korean model and a synthesized audio file")
+    def test_real_wake_engine_accepts_converted_pcm_and_matches_synthesized_phrase(self):
+        # No microphone, speakers, network download or user audio in this fixture.
+        engine = SWIFT[SWIFT.index("final class WakeSpeech {"):SWIFT.index("final class App:")]
+        fixture = (ROOT / "tests/wake_pcm_fixture.swift").read_text().replace("/*WAKE_ENGINE*/", engine)
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "fixture.aiff"
+            script = Path(folder) / "fixture.swift"
+            script.write_text(fixture)
+            subprocess.run(["say", "-v", "Yuna", "-o", str(file), "컴퓨터야"], check=True, timeout=20)
+            result = subprocess.run(["swift", str(script), str(file)], capture_output=True, text=True, timeout=60)
+            if result.returncode == 77:
+                self.skipTest("Korean SpeechTranscriber model is not installed")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("matched after first accepted buffer", result.stdout)
+
     def test_wake_loop_rearms_after_answer_and_consumes_each_match_once(self):
         wake = SWIFT[SWIFT.index("    let wakeMic = Mic()"):SWIFT.index("    // Whisper: the mic fills")]
         harness = """import Foundation
@@ -220,27 +266,22 @@ final class AVCaptureDevice {
 var selectedID = "fixture"
 struct Device { let uid = selectedID }
 func listenMic() -> Device? { Device() }
-class Mic {
-    var isRunning = false
-    func stop(_ done: () -> Void) { isRunning = false; done() }
-    func start(_ device: AVCaptureDevice, sampleRate: Double, _ buffer: (Int) -> Void, completion: (Result<Void, Error>) -> Void) { isRunning = true; completion(.success(())) }
-}
-class SFSpeechAudioBufferRecognitionRequest {
-    var requiresOnDeviceRecognition = false, shouldReportPartialResults = false, contextualStrings = [String]()
-    func append(_ i: Int) {}; func endAudio() {}
-}
-class SFSpeechRecognitionTask { func cancel() {} }
-struct Transcription { let formattedString: String }
-struct Words { let bestTranscription: Transcription; let isFinal = false }
-class SFSpeechRecognizer {
-    static var callbacks: [(Words?, Error?) -> Void] = []
-    static var languages: [String] = []
-    let locale: Locale
-    init?(locale: Locale) { self.locale = locale; Self.languages.append(locale.identifier) }
+class Mic { func stop() {} }
+struct SFSpeechRecognizer {
     static func authorizationStatus() -> Access { granted ? .authorized : .denied }
-    let isAvailable = true, supportsOnDeviceRecognition = true
-    func recognitionTask(with: SFSpeechAudioBufferRecognitionRequest, resultHandler: @escaping (Words?, Error?) -> Void) -> SFSpeechRecognitionTask {
-        Self.callbacks.append(resultHandler); return SFSpeechRecognitionTask()
+}
+final class WakeSpeech {
+    static var callbacks: [(String?, Error?) -> Void] = []
+    static var languages: [String] = []
+    var audioStalled = false
+    func stop() {}
+    func start(_ mic:Mic, device:AVCaptureDevice, locale:Locale, phrase:String, ready:@escaping ()->Void,
+               heard:@escaping (String)->Void, failed:@escaping (String)->Void) {
+        Self.languages.append(locale.identifier)
+        Self.callbacks.append { words,error in DispatchQueue.main.async {
+            if let words { heard(words) } else if let error { failed(error.localizedDescription) }
+        } }
+        DispatchQueue.main.async(execute:ready)
     }
 }
 class Flag { var isRunning = false, isPlaying = false }
@@ -268,44 +309,44 @@ final class App {
     func hush() { busy = false; retryOffer = false; cancelled += 1 }
 """ + wake + """
 }
-let app = App(), matched = Words(bestTranscription: Transcription(formattedString: "헤이아티"))
+let app = App(), matched = "헤이아티"
 func cycle() { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
 app.wakeTick()
-print("armed", SFSpeechRecognizer.callbacks.count, "cancelled", app.cancelled)
-if let old = SFSpeechRecognizer.callbacks.first {
-    old(Words(bestTranscription: Transcription(formattedString: "유튜브 소리")), nil); cycle()
+print("armed", WakeSpeech.callbacks.count, "cancelled", app.cancelled)
+if let old = WakeSpeech.callbacks.first {
+    old("유튜브 소리", nil); cycle()
     print("ambient", app.captures, app.cancelled)
     old(matched, nil); old(matched, nil); cycle()
     print("wake", app.captures, app.cancelled, app.drawing.active)
     app.engine.isRunning = false; app.wakeTick()
     old(matched, nil); cycle()
-    print("rearmed", SFSpeechRecognizer.callbacks.count, app.captures)
+    print("rearmed", WakeSpeech.callbacks.count, app.captures)
     app.voice = Flag(); app.voice?.isRunning = true; app.wakeTick()
-    SFSpeechRecognizer.callbacks.last?(matched, nil); cycle()
-    print("speaking", app.wakeRequest == nil, app.captures)
+    WakeSpeech.callbacks.last?(matched, nil); cycle()
+    print("speaking", app.wakeSpeech == nil, app.captures)
     app.voice = nil; app.wakeTick()
     app.wakeSleeping = true; app.wakeTick()
-    SFSpeechRecognizer.callbacks.last?(matched, nil); cycle()
-    print("sleep", app.wakeRequest == nil, app.captures)
+    WakeSpeech.callbacks.last?(matched, nil); cycle()
+    print("sleep", app.wakeSpeech == nil, app.captures)
     app.wakeSleeping = false; app.wakeTick()
-    print("resumed", app.wakeRequest != nil, Set(SFSpeechRecognizer.languages) == ["ko-KR"])
+    print("resumed", app.wakeSpeech != nil, Set(WakeSpeech.languages) == ["ko-KR"])
     app.wakeLocked = true
-    SFSpeechRecognizer.callbacks.last?(matched, nil); cycle()
-    print("screen-locked", app.wakeRequest == nil, app.captures)
+    WakeSpeech.callbacks.last?(matched, nil); cycle()
+    print("screen-locked", app.wakeSpeech == nil, app.captures)
     app.wakeLocked = false; app.wakeTick(); selectedID = "usb-mic"
-    let previous = SFSpeechRecognizer.callbacks.last
+    let previous = WakeSpeech.callbacks.last
     app.wakeTick(); previous?(matched, nil); cycle()
     print("device", app.wakeDevice, app.captures)
-    let failed = SFSpeechRecognizer.callbacks.last
+    let failed = WakeSpeech.callbacks.last
     failed?(nil, NSError(domain:"fixture", code:1)); cycle()
     failed?(matched, nil); cycle()
-    print("failed", app.wakeRequest == nil, app.wakeRetry > Date(), app.captures)
+    print("failed", app.wakeSpeech == nil, app.wakeRetry > Date(), app.captures)
     app.wakeRetry = .distantPast; app.wakeTick()
-    print("recovered", app.wakeRequest != nil)
+    print("recovered", app.wakeSpeech != nil)
     app.stopWake(); granted = false; app.enableWakeWord(); cycle()
-    print("denied", Prefs.enabled, app.wakeRequest == nil)
+    print("denied", Prefs.enabled, app.wakeSpeech == nil)
     granted = true; app.wakeTick()
-    print("later-grant", app.wakeRequest != nil, app.voicePermissionPending)
+    print("later-grant", app.wakeSpeech != nil, app.voicePermissionPending)
 }
 """
         self.assertEqual(swift_output(self, harness), ["armed 1 cancelled 0", "ambient 0 0",

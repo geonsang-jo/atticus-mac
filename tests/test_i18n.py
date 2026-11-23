@@ -71,7 +71,7 @@ console.log('translation engine passed');
         self.assertIn('Prefs.str("speechLanguage")', prepare)
         self.assertNotIn('uiLanguage', wake + prepare)
         self.assertIn('guard locales.contains(locale) else', prepare)
-        self.assertIn('recognizer.locale.identifier(.bcp47) == locale.identifier(.bcp47)', wake)
+        self.assertIn('SpeechTranscriber.supportedLocales.first(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) })', swift)
 
     def test_speech_uses_exact_engine_locale_or_reports_unavailable(self):
         swift = (ROOT / 'Atticus.swift').read_text()

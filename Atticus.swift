@@ -187,7 +187,7 @@ enum Prefs {
     static let path = (ProcessInfo.processInfo.environment["ATTICUS_DIR"] ?? NSString(string: "~/.config/atticus").expandingTildeInPath) + "/settings.json"
     static let defaults: [String: Any] = ["hotkeyCode": 49, "hotkeyMods": controlKey | optionKey, "hotkeyLabel": "⌃⌥Space", "login": true, "paused": false, "corner": "top-left", "linger": "normal",
         "soundStart": "Pop", "soundRelease": "Bottle", "soundDone": "Glass", "soundStop": "Tink", "volume": 0.16, "client": "claude", "model": "haiku", "instant": true,
-        "assistantMode": true, "wakeWord": true, "wakeWordName": "헤이 아티", "wakeLanguage": "ko-KR", "speechLanguage": "ko-KR", "microphone": "automatic", "quietAudio": false, "quietLevel": 0.18, "agentModel": "sonnet", "drawModel": "sonnet", "agentUserTools": true, "fixSetup": false,
+        "assistantMode": true, "wakeWord": true, "wakeWordName": "컴퓨터야", "wakePhraseVersion": 1, "wakeLanguage": "ko-KR", "speechLanguage": "ko-KR", "microphone": "automatic", "quietAudio": false, "quietLevel": 0.18, "agentModel": "sonnet", "drawModel": "sonnet", "agentUserTools": true, "fixSetup": false,
         "modelSuggestions": true,
         "meetingStyle": "Direct", "meetingCustom": "", "meetingStyles": [
             ["name": "Direct", "text": "Lead with the answer in plain words. No hedging or filler."],
@@ -205,6 +205,9 @@ enum Prefs {
     static var d: [String: Any] = {
         let saved = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path)))) as? [String: Any] ?? [:]
         var values = defaults.merging(saved) { $1 }
+        if saved["wakePhraseVersion"] == nil, saved["wakeLanguage"] as? String == "ko-KR", saved["wakeWordName"] as? String == "헤이 아티" {
+            values["wakeWordName"] = defaults["wakeWordName"]
+        }
         if saved["wakeLanguage"] == nil, let phrase = saved["wakeWordName"] as? String, phrase.range(of: "[A-Za-z]", options: .regularExpression) != nil {
             values["wakeLanguage"] = "en-US"
         }
@@ -2997,6 +3000,98 @@ enum Motion {
     }
 }
 
+// A wake session owns one on-device analyzer and one bounded input stream. The
+// app checks the generation on every event before allowing a request to start.
+final class WakeSpeech {
+    private var setup: Task<Void, Never>?, reader: Task<Void, Never>?
+    private var analyzer: SpeechAnalyzer?, input: AsyncStream<AnalyzerInput>.Continuation?
+    private let clock = NSLock()
+    private var audioExpectedSince: Date?
+    var audioStalled: Bool {
+        clock.withLock { audioExpectedSince.map { Date().timeIntervalSince($0) > 8 } ?? false }
+    }
+    func stop() {
+        setup?.cancel(); reader?.cancel(); input?.finish()
+        if let analyzer { Task { await analyzer.cancelAndFinishNow() } }
+    }
+    func start(_ mic: Mic, device: AVCaptureDevice, locale: Locale, phrase: String,
+               ready: @escaping () -> Void, heard: @escaping (String) -> Void, failed: @escaping (String) -> Void) {
+        setup = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let supported = await SpeechTranscriber.supportedLocales.first(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+                    failed("\(locale.identifier) 온디바이스 호출어 모델을 지원하지 않습니다."); return
+                }
+                try Task.checkCancellation()
+                let transcriber = SpeechTranscriber(locale: supported, preset: .progressiveTranscription)
+                if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) { try await install.downloadAndInstall() }
+                try Task.checkCancellation()
+                guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                    failed("호출어 모델의 오디오 형식을 준비하지 못했습니다."); return
+                }
+                try Task.checkCancellation()
+                let analyzer = SpeechAnalyzer(modules: [transcriber])
+                self.analyzer = analyzer
+                let context = AnalysisContext(); context.contextualStrings[.general] = [phrase]
+                try await analyzer.setContext(context)
+                try await analyzer.prepareToAnalyze(in: format)
+                try Task.checkCancellation()
+                let (stream, input) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(32))
+                self.input = input
+                reader = Task { @MainActor in
+                    do {
+                        var previousFinal = "", previousEnd = -Double.infinity
+                        for try await result in transcriber.results {
+                            try Task.checkCancellation()
+                            let words = String(result.text.characters)
+                            let gap = result.range.start.seconds - previousEnd
+                            heard(gap >= 0 && gap < 0.5 ? previousFinal + " " + words : words)
+                            if result.isFinal {
+                                previousFinal = String(words.suffix(40)); previousEnd = result.range.end.seconds
+                            }
+                        }
+                        if !Task.isCancelled { failed("호출어 인식 스트림이 종료되었습니다.") }
+                    } catch { if !Task.isCancelled { failed(error.localizedDescription) } }
+                }
+                try await analyzer.start(inputSequence: stream)
+                try Task.checkCancellation()
+                clock.withLock { self.audioExpectedSince = Date() }
+                var converter: AVAudioConverter?, first = true, conversionFailed = false
+                mic.start(device, sampleRate: format.sampleRate, { [weak self] buffer in
+                    guard let self, !conversionFailed else { return }
+                    let pcm: AVAudioPCMBuffer
+                    if buffer.format == format { pcm = buffer }
+                    else {
+                        if converter?.inputFormat != buffer.format { converter = AVAudioConverter(from: buffer.format, to: format) }
+                        let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * format.sampleRate / buffer.format.sampleRate)) + 1
+                        guard let converter, let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+                            conversionFailed = true; DispatchQueue.main.async { failed("마이크 오디오 형식 변환 실패") }; return
+                        }
+                        nonisolated(unsafe) let sourceBuffer = buffer
+                        var supplied = false, error: NSError?
+                        let status = converter.convert(to: out, error: &error) { _, state in
+                            if supplied { state.pointee = .noDataNow; return nil }
+                            supplied = true; state.pointee = .haveData; return sourceBuffer
+                        }
+                        if status == .error {
+                            conversionFailed = true
+                            let reason = error?.localizedDescription ?? "마이크 오디오 변환 실패"
+                            DispatchQueue.main.async { failed(reason) }; return
+                        }
+                        pcm = out
+                    }
+                    guard pcm.frameLength > 0 else { return }
+                    guard case .enqueued = input.yield(AnalyzerInput(buffer: pcm)) else { return }
+                    self.clock.withLock { self.audioExpectedSince = Date() }
+                    if first { first = false; DispatchQueue.main.async { ready() } }
+                }) { result in
+                    if case .failure(let error) = result { failed(error.localizedDescription) }
+                }
+            } catch { if !Task.isCancelled { failed(error.localizedDescription) } }
+        }
+    }
+}
+
 final class App: NSObject, WKScriptMessageHandler {
     let mini = MiniScreen()
     let quietAudio = AudioQuiet(layer: CoreAudioVolume(), changed: AudioRecovery.changed)
@@ -3028,8 +3123,7 @@ final class App: NSObject, WKScriptMessageHandler {
     var wakeLocked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool == true
     var wakeSuspended: Bool { wakeSleeping || wakeInactive || wakeLocked }
     let wakeMic = Mic()
-    var wakeRecognizer: SFSpeechRecognizer?
-    var wakeTask: SFSpeechRecognitionTask?, wakeRequest: SFSpeechAudioBufferRecognitionRequest?
+    var wakeSpeech: WakeSpeech?
     var wakeID = 0, wakeRetry = Date.distantPast, wakeBegan = Date.distantPast, wakeDevice = ""
     var wakeBackoff = 1.0, wakePermissionID = 0
     var wakePermissionNoticeID: Int?
@@ -3055,7 +3149,7 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     static var wakeName: String {   // blank would match everything, so it falls back
         let name = Prefs.str("wakeWordName").trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? (Prefs.str("wakeLanguage") == "en-US" ? "Atticus" : "헤이 아티") : name
+        return name.isEmpty ? (Prefs.str("wakeLanguage") == "en-US" ? "Atticus" : "컴퓨터야") : name
     }
     static func hasWakeWord(_ text: String, word: String = "Atticus") -> Bool {
         let terms = word.precomposedStringWithCanonicalMapping.split(whereSeparator: { $0.isWhitespace })
@@ -3072,9 +3166,8 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func stopWake() {
         wakeID += 1
-        let task = wakeTask, request = wakeRequest
-        wakeTask = nil; wakeRequest = nil; wakeRecognizer = nil
-        wakeMic.stop { task?.cancel(); request?.endAudio() }   // drain audio callbacks before ending their request
+        wakeSpeech?.stop(); wakeSpeech = nil
+        wakeMic.stop()
     }
     func wakeFailed(_ reason: String) {
         if Date().timeIntervalSince(wakeBegan) > 10 { wakeBackoff = 1 }
@@ -3092,55 +3185,40 @@ final class App: NSObject, WKScriptMessageHandler {
             }
         }
         if let blocker = wakeBlocker {
-            if wakeRequest != nil { stopWake() }
+            if wakeSpeech != nil { stopWake() }
             wakeStatus = blocker
             return
         }
         let device = listenMic().flatMap { AVCaptureDevice(uniqueID: $0.uid) } ?? AVCaptureDevice.default(for: .audio)
-        if wakeRequest != nil {
-            guard device?.uniqueID != wakeDevice || Date().timeIntervalSince(wakeBegan) > 50 else { return }
+        if let session = wakeSpeech {
+            if session.audioStalled { wakeFailed("마이크 입력이 끊겼습니다. 다시 연결 중"); return }
+            guard device?.uniqueID != wakeDevice else { return }
             stopWake(); wakeStatus = "호출어 인식 다시 연결 중"; wakeBackoff = 1; wakeRetry = .distantPast
         }
         guard Date() >= wakeRetry else { return }   // waiting out a backoff must not push the retry later
         guard let device else { wakeStatus = "마이크 연결 필요"; wakeRetry = Date().addingTimeInterval(2); return }
         let locale = Locale(identifier: Prefs.str("wakeLanguage"))
-        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.locale.identifier(.bcp47) == locale.identifier(.bcp47),
-              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
-            wakeStatus = "\(locale.identifier) 온디바이스 호출어 인식 사용 불가 · 다시 시도 중"
-            wakeRetry = Date().addingTimeInterval(10); return
-        }
-        wakeStatus = "마이크 여는 중"
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true
-        request.contextualStrings = [Self.wakeName]   // helps it hear names that are not everyday words
-        wakeRecognizer = recognizer; wakeRequest = request; wakeID += 1; let id = wakeID
-        wakeBegan = Date(); wakeDevice = device.uniqueID
-        wakeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, wakeID == id else { return }
-                if let blocker = wakeBlocker { stopWake(); wakeStatus = blocker; return }
-                if let result, Self.hasWakeWord(result.bestTranscription.formattedString, word: Self.wakeName) {
-                    NSLog("Wake word: matched %@", locale.identifier)
-                    wakeBackoff = 1
-                    stopWake()
-                    if busy || retryOffer || drawing.active {
-                        hush()
-                        if drawing.active { drawing.clear() }
-                    }
-                    clickMicrophone(); handsFree = engine.isRunning
-                } else if error != nil || result?.isFinal == true {
-                    if let error { NSLog("Wake word: recognizer error %@", error.localizedDescription) }
-                    if error == nil { wakeBackoff = 1 }; wakeFailed("호출어 인식 다시 연결 중")
-                }
-            }
-        }
-        wakeMic.start(device, sampleRate: 16000, { request.append($0) }) { [weak self] result in
+        let session = WakeSpeech(), phrase = Self.wakeName
+        wakeSpeech = session; wakeID += 1; let id = wakeID
+        wakeBegan = Date(); wakeDevice = device.uniqueID; wakeStatus = "온디바이스 호출어 모델 준비 중"
+        session.start(wakeMic, device: device, locale: locale, phrase: phrase, ready: { [weak self] in
             guard let self, wakeID == id else { return }
-            switch result {
-            case .success: wakeStatus = "호출어 대기 중 · " + Self.wakeName
-            case .failure(let error): wakeFailed("마이크 오류 · " + error.localizedDescription)
+            wakeStatus = "호출어 대기 중 · " + phrase
+        }, heard: { [weak self] words in
+            guard let self, wakeID == id else { return }
+            if let blocker = wakeBlocker { stopWake(); wakeStatus = blocker; return }
+            guard Self.hasWakeWord(words, word: phrase) else { return }
+            NSLog("Wake word: matched %@", locale.identifier)
+            wakeBackoff = 1; stopWake()
+            if busy || retryOffer || drawing.active {
+                hush()
+                if drawing.active { drawing.clear() }
             }
-        }
+            clickMicrophone(); handsFree = engine.isRunning
+        }, failed: { [weak self] reason in
+            guard let self, wakeID == id else { return }
+            wakeFailed("호출어 인식 오류 · " + reason)
+        })
     }
     func enableWakeWord(settings: Bool = false) {
         wakePermissionID += 1; let id = wakePermissionID
@@ -3334,7 +3412,7 @@ final class App: NSObject, WKScriptMessageHandler {
     func sound(_ name: String, _ v: Float) {
         guard name != "None" else { return }
         let s = NSSound(named: name); s?.volume = v   // Atticus's own system sounds (his pick, Nov 13: "keep our original sounds")
-        if wakeRequest != nil { stopWake() }
+        if wakeSpeech != nil { stopWake() }
         if s?.play() == true { cueSound = s; cueEnds = max(cueEnds, Date().addingTimeInterval((s?.duration ?? 0) + 0.3)) }
     }
     func cue(_ k: String) { let n = Prefs.str(k); if n != "None" { sound(n, Float(Prefs.num("volume"))) } }   // soundStart / soundRelease / soundDone / soundStop
@@ -7151,8 +7229,8 @@ final class SettingsWindow: NSObject, WKScriptMessageHandler, WKNavigationDelega
             }
         }
         if ["wakeLanguage", "wakeWordName", "microphone"].contains(k) {
-            if k == "wakeLanguage", ["Atticus", "헤이 아티"].contains(Prefs.str("wakeWordName")) {
-                Prefs.set("wakeWordName", Prefs.str(k) == "en-US" ? "Atticus" : "헤이 아티")
+            if k == "wakeLanguage", ["Atticus", "컴퓨터야"].contains(Prefs.str("wakeWordName")) {
+                Prefs.set("wakeWordName", Prefs.str(k) == "en-US" ? "Atticus" : "컴퓨터야")
             }
             app.stopWake(); app.wakeRetry = .distantPast; app.wakeBackoff = 1; app.wakeTick()
             if k == "wakeLanguage" { push() }
