@@ -60,7 +60,11 @@ _PLAYER_ACTIONS = {
 _YOUTUBE = r"(?:유튜브|(?<![A-Za-z0-9_])you ?tube(?![A-Za-z0-9_]))"
 _YOUTUBE_MENTION = re.compile(_YOUTUBE, re.IGNORECASE)
 _UNSUPPORTED_YOUTUBE = Command(Action.INVALID, _CAPABILITIES)
-_PREFIX = rf"(?:{_YOUTUBE}(?:에서|의)?\s*)?"
+_PREFIX = rf"(?:{_YOUTUBE}(?:에서|의|를)?\s*)?"
+_CURRENT_TARGET = re.compile(
+    rf"^(?:(?:지금|현재)\s+)?(?:(?:듣고|보고)\s+(?:있는|있던)|열려\s+있는)\s+(?={_YOUTUBE}|영상)",
+    re.IGNORECASE,
+)
 _PLEASE = r"(?:\s*(?:줘|주세요|주십시오))?"
 _DO = rf"(?:\s*(?:해|하세요|해요){_PLEASE})?"
 _OPEN = rf"(?:열어{_PLEASE}|열기|켜{_PLEASE})"
@@ -159,8 +163,9 @@ def parse_command(text: str) -> Command | None:
     if re.search(rf"{_YOUTUBE}.*검색.*(?:그리고|하고).*(?:멈춰|정지|재생|틀어|음소거)", text, re.IGNORECASE):
         return Command(Action.REJECT)
 
+    control = _CURRENT_TARGET.sub("", text, count=1)
     for action, pattern in _TEXT_ACTIONS:
-        if re.fullmatch(pattern, text, re.IGNORECASE):
+        if re.fullmatch(pattern, control if action in _PLAYER_ACTIONS else text, re.IGNORECASE):
             return Command(action)
     volume = _VOLUME.fullmatch(text)
     if volume:

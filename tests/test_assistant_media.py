@@ -53,6 +53,16 @@ class MediaParserTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assert_command(text, action)
 
+    def test_conversational_leading_context_preserves_explicit_control(self):
+        for text, action in (
+            ("지금 듣고 있는 YouTube 다시 틀어 줘.", "play"),
+            ("지금 보고 있는 유튜브를 다시 틀어 줘.", "play"),
+            ("현재 열려 있는 유튜브에서 영상 멈춰 줘.", "pause"),
+            ("보고 있던 영상을 다시 틀어줘", "play"),
+        ):
+            with self.subTest(text=text):
+                self.assert_command(text, action)
+
     def test_numeric_bounds_signed_direction_and_spoken_numbers(self):
         self.assert_command("볼륨 ３０퍼센트로 해.", "volume", 30)
         self.assert_command("볼륨을 삼십 퍼센트로 설정해줘", "volume", 30)
@@ -159,6 +169,12 @@ class MediaAdapterTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(adapter.recognizes(text))
                 self.assertIn("검색", adapter.handle(text))
+        self.assertEqual(transport.requests, [])
+
+    def test_conversational_context_never_acts_on_rejects_or_unsupported_requests(self):
+        adapter, transport = self.adapter()
+        self.assertIn("실행하지", adapter.handle("지금 듣고 있는 YouTube 다시 틀지 마."))
+        self.assertIn("검색", adapter.handle("지금 듣고 있는 YouTube 다음 영상으로 넘어가 줘."))
         self.assertEqual(transport.requests, [])
 
     def test_negative_command_never_calls_aside(self):
