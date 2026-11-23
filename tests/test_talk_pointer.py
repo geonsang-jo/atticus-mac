@@ -205,7 +205,7 @@ pen.stop(); precondition(pen.timer == nil && pen.windows.isEmpty)
                                     selection_context=lambda:'', relevant_rules=lambda _:'', recent=lambda:[],
                                     workflows=lambda *a:'', tool_help=lambda *a,**k:'', profile_context=lambda *a:'',
                                     system_ui_context=lambda:'', start_ai=lambda *a:None,
-                                    pref=lambda k,d=None: screen if k=='screen' else d), \
+                                    pref=lambda k, d=None: {'screen': screen, 'assistantMode': False}.get(k, d)), \
                      patch.object(atticus,'point_context',return_value=('explicit mark' if explicit else '',[])), \
                      patch.object(atticus,'look',return_value=[('fake.jpg','Screen 1')]) as look, \
                      patch.object(atticus,'fast') as fast, \

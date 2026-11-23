@@ -23,7 +23,8 @@ class HandsTests(unittest.TestCase):
         self.root = tempfile.TemporaryDirectory(); self.addCleanup(self.root.cleanup)
         Path(self.root.name, 'hands.json').write_text('{}')
         for p in [patch.object(atticus, 'DIR', self.root.name), patch.object(atticus, 'wait_commit', return_value=True),
-                  patch.object(atticus, 'pref', side_effect=lambda k,d:d), patch.dict(os.environ, {'ATTICUS_ASK':self.root.name}, clear=True)]:
+                  patch.object(atticus, 'pref', side_effect=lambda k, d: False if k == 'assistantMode' else d),
+                  patch.dict(os.environ, {'ATTICUS_ASK':self.root.name}, clear=True)]:
             p.start(); self.addCleanup(p.stop)
 
     def result(self, args, labels, risky=True, secure=False):
