@@ -3006,12 +3006,37 @@ final class WakeSpeech {
     private var setup: Task<Void, Never>?, reader: Task<Void, Never>?
     private var analyzer: SpeechAnalyzer?, input: AsyncStream<AnalyzerInput>.Continuation?
     private let clock = NSLock()
-    private var audioExpectedSince: Date?
-    var audioStalled: Bool {
-        clock.withLock { audioExpectedSince.map { Date().timeIntervalSince($0) > 8 } ?? false }
+    private var audioExpectedSince: TimeInterval?
+    struct StartupDeadline {
+        let download: Progress?
+        private let began: TimeInterval
+        private var advanced: TimeInterval, fraction: Double
+        init(download: Progress? = nil, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+            self.download = download; began = now; advanced = now; fraction = download?.fractionCompleted ?? 0
+        }
+        mutating func timeout(at now: TimeInterval) -> String? {
+            guard let download else {
+                return now - began >= 60 ? "호출어 모델 준비 시간 초과 · 다시 연결 중" : nil
+            }
+            if download.fractionCompleted > fraction { fraction = download.fractionCompleted; advanced = now }
+            return now - advanced >= 180 || now - began >= 2700 ? "호출어 모델 다운로드 시간 초과 · 다시 연결 중" : nil
+        }
+    }
+    private var startup = StartupDeadline()
+    var startupStatus: String? {
+        guard clock.withLock({ audioExpectedSince == nil }) else { return nil }
+        return startup.download == nil ? "온디바이스 호출어 모델 준비 중" : "호출어 모델 다운로드 중"
+    }
+    func stallReason() -> String? {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let audio = clock.withLock({ audioExpectedSince }) {
+            return now - audio > 8 ? "마이크 입력이 끊겼습니다. 다시 연결 중" : nil
+        }
+        return startup.timeout(at: now)
     }
     func stop() {
         setup?.cancel(); reader?.cancel(); input?.finish()
+        if let download = startup.download, download.isCancellable { download.cancel() }
         if let analyzer { Task { await analyzer.cancelAndFinishNow() } }
     }
     func start(_ mic: Mic, device: AVCaptureDevice, locale: Locale, phrase: String,
@@ -3024,8 +3049,13 @@ final class WakeSpeech {
                 }
                 try Task.checkCancellation()
                 let transcriber = SpeechTranscriber(locale: supported, preset: .progressiveTranscription)
-                if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) { try await install.downloadAndInstall() }
+                if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                    try Task.checkCancellation()
+                    startup = StartupDeadline(download: install.progress)
+                    try await install.downloadAndInstall()
+                }
                 try Task.checkCancellation()
+                startup = StartupDeadline()
                 guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
                     failed("호출어 모델의 오디오 형식을 준비하지 못했습니다."); return
                 }
@@ -3055,7 +3085,7 @@ final class WakeSpeech {
                 }
                 try await analyzer.start(inputSequence: stream)
                 try Task.checkCancellation()
-                clock.withLock { self.audioExpectedSince = Date() }
+                clock.withLock { self.audioExpectedSince = ProcessInfo.processInfo.systemUptime }
                 var converter: AVAudioConverter?, first = true, conversionFailed = false
                 mic.start(device, sampleRate: format.sampleRate, { [weak self] buffer in
                     guard let self, !conversionFailed else { return }
@@ -3082,7 +3112,7 @@ final class WakeSpeech {
                     }
                     guard pcm.frameLength > 0 else { return }
                     guard case .enqueued = input.yield(AnalyzerInput(buffer: pcm)) else { return }
-                    self.clock.withLock { self.audioExpectedSince = Date() }
+                    self.clock.withLock { self.audioExpectedSince = ProcessInfo.processInfo.systemUptime }
                     if first { first = false; DispatchQueue.main.async { ready() } }
                 }) { result in
                     if case .failure(let error) = result { failed(error.localizedDescription) }
@@ -3191,7 +3221,8 @@ final class App: NSObject, WKScriptMessageHandler {
         }
         let device = listenMic().flatMap { AVCaptureDevice(uniqueID: $0.uid) } ?? AVCaptureDevice.default(for: .audio)
         if let session = wakeSpeech {
-            if session.audioStalled { wakeFailed("마이크 입력이 끊겼습니다. 다시 연결 중"); return }
+            if let reason = session.stallReason() { wakeFailed(reason); return }
+            if let status = session.startupStatus { wakeStatus = status }
             guard device?.uniqueID != wakeDevice else { return }
             stopWake(); wakeStatus = "호출어 인식 다시 연결 중"; wakeBackoff = 1; wakeRetry = .distantPast
         }

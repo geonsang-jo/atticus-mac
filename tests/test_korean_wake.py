@@ -219,6 +219,23 @@ print("legacy", legacy.fast, legacy.speculative)
         self.assertLess(start.index("engine.start(device"), start.index('cue("soundStart")'))
         self.assertLess(start.index("if case .failure(let error) = result"), start.index('cue("soundStart")'))
 
+    def test_model_deadline_extends_only_for_an_advancing_download(self):
+        self.assertIn("struct StartupDeadline", SWIFT)
+        timer = SWIFT.split("    struct StartupDeadline", 1)[1].split("    private var startup", 1)[0]
+        test = """import Foundation
+struct StartupDeadline""" + timer + """
+var prep = StartupDeadline(now: 0)
+print(prep.timeout(at: 59) == nil, prep.timeout(at: 61) != nil)
+let asset = Progress(totalUnitCount: 100)
+var download = StartupDeadline(download: asset, now: 0)
+asset.completedUnitCount = 5
+print(download.timeout(at: 90) == nil, download.timeout(at: 250) == nil)
+print(download.timeout(at: 271) != nil)
+asset.completedUnitCount = 6
+print(download.timeout(at: 2701) != nil)
+"""
+        self.assertEqual(swift_output(self, test), ["true true", "true true", "true", "true"])
+
     def test_wake_uses_independent_on_device_transcriber(self):
         self.assertIn("final class WakeSpeech", SWIFT)
         engine = SWIFT.split("final class WakeSpeech", 1)[1].split("final class App:", 1)[0]
@@ -233,7 +250,8 @@ print("legacy", legacy.fast, legacy.speculative)
     def test_real_wake_engine_accepts_converted_pcm_and_matches_synthesized_phrase(self):
         # No microphone, speakers, network download or user audio in this fixture.
         engine = SWIFT[SWIFT.index("final class WakeSpeech {"):SWIFT.index("final class App:")]
-        fixture = (ROOT / "tests/wake_pcm_fixture.swift").read_text().replace("/*WAKE_ENGINE*/", engine)
+        matcher = SWIFT[SWIFT.index("    static func hasWakeWord("):SWIFT.index("    func stopWake(")]
+        fixture = (ROOT / "tests/wake_pcm_fixture.swift").read_text().replace("/*WAKE_ENGINE*/", engine).replace("/*WAKE_MATCHER*/", matcher)
         with tempfile.TemporaryDirectory() as folder:
             file = Path(folder) / "fixture.aiff"
             script = Path(folder) / "fixture.swift"
@@ -273,8 +291,10 @@ struct SFSpeechRecognizer {
 final class WakeSpeech {
     static var callbacks: [(String?, Error?) -> Void] = []
     static var languages: [String] = []
-    var audioStalled = false
-    func stop() {}
+    var mockStartupFailure: String?, stopped = false
+    var startupStatus: String? { nil }
+    func stallReason() -> String? { mockStartupFailure }
+    func stop() { stopped = true }
     func start(_ mic:Mic, device:AVCaptureDevice, locale:Locale, phrase:String, ready:@escaping ()->Void,
                heard:@escaping (String)->Void, failed:@escaping (String)->Void) {
         Self.languages.append(locale.identifier)
@@ -347,12 +367,16 @@ if let old = WakeSpeech.callbacks.first {
     print("denied", Prefs.enabled, app.wakeSpeech == nil)
     granted = true; app.wakeTick()
     print("later-grant", app.wakeSpeech != nil, app.voicePermissionPending)
+    let lateReady = WakeSpeech.callbacks.last, stalled = app.wakeSpeech
+    app.wakeSpeech?.mockStartupFailure = "모델 준비 시간 초과"; app.wakeTick()
+    lateReady?(matched, nil); cycle()
+    print("preparation-timeout", stalled?.stopped == true, app.wakeSpeech == nil, app.wakeStatus == "모델 준비 시간 초과", app.wakeRetry > Date(), app.captures)
 }
 """
         self.assertEqual(swift_output(self, harness), ["armed 1 cancelled 0", "ambient 0 0",
                          "wake 1 1 false", "rearmed 2 1", "speaking true 1", "sleep true 1", "resumed true true",
                          "screen-locked true 1", "device usb-mic 1", "failed true true 1", "recovered true",
-                         "denied true true", "later-grant true false"])
+                         "denied true true", "later-grant true false", "preparation-timeout true true true true 1"])
 
 
 if __name__ == "__main__":

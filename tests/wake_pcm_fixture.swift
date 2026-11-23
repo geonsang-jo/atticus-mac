@@ -34,13 +34,17 @@ final class Mic {
 
 /*WAKE_ENGINE*/
 
+struct App {
+    /*WAKE_MATCHER*/
+}
+
 let session = WakeSpeech(), target = "컴퓨터야"
 Task { @MainActor in
     guard await SpeechTranscriber.installedLocales.contains(where: { $0.identifier(.bcp47) == "ko-KR" }) else { exit(77) }
     var ready = false
     session.start(Mic(), device: AVCaptureDevice(), locale: Locale(identifier: "ko-KR"), phrase: target,
                   ready: { ready = true }, heard: { words in
-        if words.contains(target) {
+        if App.hasWakeWord(words, word: target) {
             guard ready else { exit(1) }
             session.stop(); print("matched after first accepted buffer"); exit(0)
         }
